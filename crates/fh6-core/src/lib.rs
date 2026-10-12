@@ -68,7 +68,11 @@ pub fn parse_packet(buf: &[u8]) -> Result<Telemetry, ParseError> {
 ///
 /// HUD 每帧需要同时访问原始值和派生值，把它们打包成结构体可以避免
 /// 调用方反复传两个参数。
-#[derive(Debug, Clone, PartialEq, Default)]
+///
+/// 刻意保持 `Copy`：收包线程每帧写入共享槽位、渲染线程每帧读取，
+/// 按值拷贝一个扁平结构体比 `Arc`/`Box` 都更省事也更快。
+/// 这也是为什么 [`Derived`] 的挡位存 `gear_raw: u8` 而不是字符串。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Frame {
     /// 原始遥测。
     pub telemetry: Telemetry,

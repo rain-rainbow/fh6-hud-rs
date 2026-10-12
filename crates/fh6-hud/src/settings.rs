@@ -300,8 +300,9 @@ pub struct PopupParams {
 impl Default for PopupParams {
     fn default() -> Self {
         Self {
+            // 放在仪表弧线之上、屏幕上方空白区：既不挡中心读数，也不出画面
             cx: 960.0,
-            cy: 420.0,
+            cy: 300.0,
             seconds_scale: 1.0,
             scale: PopupScale::DEFAULT,
             hero_scale: 1.35,

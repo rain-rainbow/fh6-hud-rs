@@ -35,12 +35,28 @@
 //!
 //! 详见 [`docs/架构决策.md`](https://github.com/rain-rainbow/fh6-hud-rs/blob/main/docs/架构决策.md)。
 
-#![forbid(unsafe_code)]
+// 注意：本项目**不使用** crate 级 orbid(unsafe_code)，因为 Win32 FFI 必须用 unsafe。
+// 取而代之的策略是：把 unsafe 集中隔离到 win32（纯声明）与 window（唯一调用点）两个模块，
+// 其余所有模块（pack/telemetry/derived/drift/gauge/settings/shared/timing）在文件顶部各自声明
+// #![forbid(unsafe_code)]，从编译期保证纯逻辑部分零 unsafe。
+#![warn(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
 pub mod gauge;
+pub mod hud;
+pub mod raster;
 pub mod settings;
+pub mod shared;
+pub mod textmask;
+pub mod timing;
+pub mod win32;
+pub mod window;
 
 pub use gauge::{Bgra, DirtyRegion, Rect, Theme, TrailBuf};
+pub use hud::{BarItem, HudFrame, HudPainter};
+pub use raster::{Rasterizer, TextAlign};
 pub use settings::{Settings, SETTINGS_VERSION};
+pub use shared::{LinkState, StopFlag, TelemetrySlot};
+pub use timing::{FrameClock, MovingAverage};
+pub use window::{Canvas, KeyEvent, LayeredWindow, WindowOptions};
