@@ -1,0 +1,14 @@
+[package]
+name = "fh6-hud"
+description = "FH6 轻量原生 HUD 叠加层（透明、置顶、点击穿透）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fh6-hud"
+path = "src/main.rs"
+
+[dependencies]
+fh6-core = { workspace = true }

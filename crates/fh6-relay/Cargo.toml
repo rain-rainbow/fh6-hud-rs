@@ -1,0 +1,21 @@
+[package]
+name = "fh6-relay"
+description = "FH6 遥测 UDP 分发器：让 HUD 与飞智自适应扳机同时接收数据"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "fh6_relay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fh6-relay"
+path = "src/main.rs"
+
+[dependencies]
+fh6-core = { workspace = true }
+
+[dev-dependencies]
+# 集成测试用真实 UDP 收发验证转发链，仅需标准库

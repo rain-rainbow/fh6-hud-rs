@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fh6-core",
+    "crates/fh6-relay",
+    "crates/fh6-hud",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/rain-rainbow/fh6-hud-rs"
+authors = ["rain-rainbow"]
+
+[workspace.dependencies]
+fh6-core = { path = "crates/fh6-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 发布构建：优先体积与性能
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# HUD 是长跑进程，需要在极低占用下保持稳定
+[profile.dist]
+inherits = "release"
+lto = "fat"
+overflow-checks = false
+debug-assertions = false
