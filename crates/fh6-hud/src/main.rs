@@ -114,7 +114,9 @@ fn parse_port(s: &str) -> Result<u16, String> {
             .parse::<u16>()
             .map_err(|e| format!("`{s}` 的端口不合法: {e}"));
     }
-    Err(format!("`{s}` 不是合法的端口，正确写法如 5302 或 127.0.0.1:5302"))
+    Err(format!(
+        "`{s}` 不是合法的端口，正确写法如 5302 或 127.0.0.1:5302"
+    ))
 }
 
 #[cfg(test)]

@@ -234,7 +234,8 @@ fn 连续多个数据包应全部转发() {
     }
 
     // 收齐 N 个包
-    sub.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    sub.set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
     let mut received = Vec::new();
     let mut buf = [0u8; 2048];
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -324,9 +325,7 @@ fn 短包也应被转发但会被统计() {
 
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
     let short = vec![0xAAu8; 10];
-    sender
-        .send_to(&short, format!("127.0.0.1:{port}"))
-        .unwrap();
+    sender.send_to(&short, format!("127.0.0.1:{port}")).unwrap();
 
     let got = recv_with_timeout(&sub, Duration::from_secs(2));
     // 给 relay 一点时间把统计写出来
@@ -338,7 +337,11 @@ fn 短包也应被转发但会被统计() {
     assert_eq!(got.as_deref(), Some(short.as_slice()), "短包也应原样转发");
     let s = *stats_holder.lock().unwrap();
     assert!(s.packets >= 1, "应统计到包, 实际 {}", s.packets);
-    assert!(s.short_packets >= 1, "应统计到短包, 实际 {}", s.short_packets);
+    assert!(
+        s.short_packets >= 1,
+        "应统计到短包, 实际 {}",
+        s.short_packets
+    );
     assert!(s.last_sender.is_some(), "应记录来源地址");
 }
 

@@ -38,13 +38,18 @@
 #![warn(clippy::all)]
 
 pub mod derived;
+pub mod drift;
 pub mod pack;
 pub mod raw;
 pub mod telemetry;
 
 pub use derived::{derive, Derived};
+pub use drift::{
+    DriftJudge, DriftSnapshot, DriftState, FlowQuality, OperationPopup, Popup, PopupState,
+    RiskLabel, Style,
+};
 pub use pack::{
-    FLYDIGI_FORZA_PORT, FM_SLED_PACKET_SIZE, FIELDS_SIZE, LOCALHOST, MPS_TO_KPH, PACKET_SIZE,
+    FIELDS_SIZE, FLYDIGI_FORZA_PORT, FM_SLED_PACKET_SIZE, LOCALHOST, MPS_TO_KPH, PACKET_SIZE,
     STANDARD_GRAVITY,
 };
 pub use raw::RawPacket;
@@ -163,16 +168,28 @@ mod tests {
     fn 车轮组偏移必须相差16字节() {
         // 每个「每轮一组」的字段是 4 个 f32 = 16 字节，组与组之间的间距
         // 应该是各字段尺寸的累加。这里只断言最基本的 stride 正确性。
-        assert_eq!(RawPacket::wheel_offset(pack::TIRE_SLIP_RATIO, WHEEL_FL),
-                   pack::TIRE_SLIP_RATIO);
-        assert_eq!(RawPacket::wheel_offset(pack::TIRE_SLIP_RATIO, WHEEL_FR),
-                   pack::TIRE_SLIP_RATIO + 4);
-        assert_eq!(RawPacket::wheel_offset(pack::TIRE_SLIP_RATIO, WHEEL_RR),
-                   pack::TIRE_SLIP_RATIO + 12);
+        assert_eq!(
+            RawPacket::wheel_offset(pack::TIRE_SLIP_RATIO, WHEEL_FL),
+            pack::TIRE_SLIP_RATIO
+        );
+        assert_eq!(
+            RawPacket::wheel_offset(pack::TIRE_SLIP_RATIO, WHEEL_FR),
+            pack::TIRE_SLIP_RATIO + 4
+        );
+        assert_eq!(
+            RawPacket::wheel_offset(pack::TIRE_SLIP_RATIO, WHEEL_RR),
+            pack::TIRE_SLIP_RATIO + 12
+        );
         // 常用后轴轮的绝对偏移，写死一遍作为「签名」——
         // 一旦有人改动偏移量，这里会立刻失败提醒复核抓包数据。
-        assert_eq!(RawPacket::wheel_offset(pack::TIRE_COMBINED_SLIP, WHEEL_RL), 188);
-        assert_eq!(RawPacket::wheel_offset(pack::TIRE_COMBINED_SLIP, WHEEL_RR), 192);
+        assert_eq!(
+            RawPacket::wheel_offset(pack::TIRE_COMBINED_SLIP, WHEEL_RL),
+            188
+        );
+        assert_eq!(
+            RawPacket::wheel_offset(pack::TIRE_COMBINED_SLIP, WHEEL_RR),
+            192
+        );
         assert_eq!(RawPacket::wheel_offset(pack::TIRE_SLIP_RATIO, WHEEL_RL), 92);
         assert_eq!(pack::TIRE_TEMP + 8, 276); // 后左胎温
         assert_eq!(pack::TIRE_TEMP + 12, 280); // 后右胎温

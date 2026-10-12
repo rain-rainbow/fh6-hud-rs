@@ -106,11 +106,7 @@ fn 横向G符号约定为右转正() {
     // 右转：加速度指向 +X
     t.acceleration = [9.80665, 0.0, 0.0];
     let d = derived::derive(&t);
-    assert!(
-        d.g_lateral > 0.9,
-        "右转横向 G 应为正, 实际 {}",
-        d.g_lateral
-    );
+    assert!(d.g_lateral > 0.9, "右转横向 G 应为正, 实际 {}", d.g_lateral);
 
     // 左转：加速度指向 -X，横向 G 应为负
     t.acceleration = [-9.80665, 0.0, 0.0];
@@ -181,8 +177,14 @@ fn 方向盘用127而不是128做满量程() {
 #[test]
 fn 后轴滑移取绝对值平均() {
     let mut t = base();
-    t.wheel_rl = Wheel { combined_slip: -0.8, ..Default::default() };
-    t.wheel_rr = Wheel { combined_slip: 0.4, ..Default::default() };
+    t.wheel_rl = Wheel {
+        combined_slip: -0.8,
+        ..Default::default()
+    };
+    t.wheel_rr = Wheel {
+        combined_slip: 0.4,
+        ..Default::default()
+    };
     // 倒车打滑时滑移率为负，但打滑程度应看幅值
     assert!((t.rear_combined_slip() - 0.6).abs() < 1e-6);
 }
@@ -191,11 +193,24 @@ fn 后轴滑移取绝对值平均() {
 fn 挡位0显示为R其余为数字() {
     let mut buf = [0u8; 4];
 
-    let d = Derived { gear_raw: 0, ..Default::default() };
+    let d = Derived {
+        gear_raw: 0,
+        ..Default::default()
+    };
     assert_eq!(d.gear_display(&mut buf), "R");
 
-    for (raw, expect) in [(1u8, "1"), (9, "9"), (10, "10"), (12, "12"), (100, "100"), (255, "255")] {
-        let d = Derived { gear_raw: raw, ..Default::default() };
+    for (raw, expect) in [
+        (1u8, "1"),
+        (9, "9"),
+        (10, "10"),
+        (12, "12"),
+        (100, "100"),
+        (255, "255"),
+    ] {
+        let d = Derived {
+            gear_raw: raw,
+            ..Default::default()
+        };
         assert_eq!(d.gear_display(&mut buf), expect, "挡位 {raw} 显示错误");
     }
 }
@@ -269,8 +284,14 @@ fn 解析编码往返后派生量一致() {
         accel_raw: 200,
         steer_raw: -64,
         gear_raw: 3,
-        wheel_rl: Wheel { combined_slip: 0.9, ..Default::default() },
-        wheel_rr: Wheel { combined_slip: 0.7, ..Default::default() },
+        wheel_rl: Wheel {
+            combined_slip: 0.9,
+            ..Default::default()
+        },
+        wheel_rr: Wheel {
+            combined_slip: 0.7,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
