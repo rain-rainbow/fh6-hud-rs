@@ -1,0 +1,15 @@
+[package]
+name = "fh6-core"
+description = "《极限竞速：地平线6》遥测数据包解析与派生量计算（纯逻辑、无 GUI、无 I/O）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+# 打开后 Telemetry 等类型可序列化，便于写日志 / 传给前端调试
+serde = ["dep:serde"]
