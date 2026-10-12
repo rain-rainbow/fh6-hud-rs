@@ -74,6 +74,7 @@ fh6-hud — FH6 轻量原生 HUD 叠加层
                              默认输出 hud-selftest.bmp
         --size <宽x高>       画布/窗口尺寸，默认取虚拟屏幕大小
         --no-topmost         不置顶（调试用）
+        --diag               诊断模式：打印实测窗口/画布尺寸，并在四角画标记
     -h, --help               显示本帮助
     -V, --version            显示版本
 
@@ -132,6 +133,8 @@ struct Config {
     selftest_out: Option<String>,
     size: Option<(i32, i32)>,
     no_topmost: bool,
+    /// 诊断模式：打印实测尺寸并在四角画标记，用于核对窗口是否 1:1 映射。
+    diag: bool,
 }
 
 impl Default for Config {
@@ -143,6 +146,7 @@ impl Default for Config {
             selftest_out: None,
             size: None,
             no_topmost: false,
+            diag: false,
         }
     }
 }
@@ -193,6 +197,7 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
                 cfg.size = Some(parse_size(v)?);
             }
             "--no-topmost" => cfg.no_topmost = true,
+            "--diag" => cfg.diag = true,
             other => {
                 if let Some(v) = other.strip_prefix("--listen=") {
                     cfg.listen = v.to_string();
@@ -402,6 +407,30 @@ fn write_bmp(path: &std::path::Path, canvas: &Canvas) -> Result<(), String> {
     Ok(())
 }
 
+/// 画诊断标记：四角红方块 + 画面正中十字 + 主仪表圆心处绿方块。
+///
+/// 用途：截图后核对标记是否正好落在画面四角。
+/// 若标记不在角上（或间距不等于画布尺寸），说明窗口没有 1:1 铺满屏幕，
+/// 此时问题在窗口/合成环节而不是绘制逻辑。
+fn draw_diag_markers(cv: &mut Canvas, settings: &Settings) {
+    let (cw, ch) = cv.size();
+    let (cw, ch) = (cw as f32, ch as f32);
+    let mark = Bgra::rgb(255, 0, 64);
+    let s = 24.0f32;
+    cv.fill_rect(Rect::new(0.0, 0.0, s, s), mark);
+    cv.fill_rect(Rect::new(cw - s, 0.0, s, s), mark);
+    cv.fill_rect(Rect::new(0.0, ch - s, s, s), mark);
+    cv.fill_rect(Rect::new(cw - s, ch - s, s, s), mark);
+    let cx = cw * 0.5;
+    let cy = ch * 0.5;
+    cv.fill_rect(Rect::new(cx - 60.0, cy - 2.0, 120.0, 4.0), mark);
+    cv.fill_rect(Rect::new(cx - 2.0, cy - 60.0, 4.0, 120.0), mark);
+    cv.fill_rect(
+        Rect::new(settings.angle.cx - 8.0, settings.angle.cy - 8.0, 16.0, 16.0),
+        Bgra::rgb(0, 255, 128),
+    );
+}
+
 /// 实时模式。
 fn run_live(cfg: &Config) -> Result<(), String> {
     let settings = load_settings(cfg);
@@ -429,6 +458,35 @@ fn run_live(cfg: &Config) -> Result<(), String> {
         "窗口尺寸: {}x{} @ ({}, {})",
         opts.width, opts.height, opts.x, opts.y
     );
+    if cfg.diag {
+        // 诊断模式：把「我们以为的尺寸」全部打出来，并在四角画标记。
+        // 用途：如果截图上标记不在画面四角，说明窗口没有 1:1 铺满屏幕。
+        let (cw, ch) = win.canvas().size();
+        println!("==== 诊断 ====");
+        println!("  画布尺寸 (Canvas)      : {cw} x {ch}");
+        println!(
+            "  窗口请求尺寸 (opts)    : {} x {} @ ({}, {})",
+            opts.width, opts.height, opts.x, opts.y
+        );
+        println!("  是否请求置顶           : {}", !cfg.no_topmost);
+        println!(
+            "  脏区重绘启用           : {}",
+            settings.perf.dirty_region_redraw
+        );
+        println!(
+            "  活动/静止帧率上限      : {} / {} fps",
+            settings.perf.active_fps, settings.perf.idle_fps
+        );
+        println!(
+            "  设计基准               : 主仪表圆心 ({}, {}) 半径 {}",
+            settings.angle.cx, settings.angle.cy, settings.angle.radius
+        );
+        println!("  预期标记位置           : 四角各一个 24x24 方块，中心另有一个十字");
+
+        println!("  已上传标记帧。请截图，并核对四个红方块是否正好在画面四角。");
+        println!("  按 Ctrl+C 退出。");
+    }
+
     if cfg.no_topmost {
         println!("注意: 已请求不置顶，窗口可能被游戏盖住（仅用于调试）。");
     }
@@ -436,7 +494,7 @@ fn run_live(cfg: &Config) -> Result<(), String> {
     println!();
 
     // ---- 3. 渲染主循环 ----
-    let result = render_loop(&mut win, &slot, &stop, &settings);
+    let result = render_loop(cfg.diag, &mut win, &slot, &stop, &settings);
 
     // ---- 4. 收尾 ----
     stop.request();
@@ -462,7 +520,8 @@ fn spawn_receiver(
     let socket = UdpSocket::bind(&listen).map_err(|e| {
         format!(
             "无法绑定 {listen}: {e}\n\
-             提示：端口可能已被占用。可用 `netstat -ano -p UDP | findstr :{}` 查看。",
+             提示：端口可能已被占用。可用 
+etstat -ano -p UDP | findstr :{}` 查看。",
             listen.rsplit(':').next().unwrap_or("5302")
         )
     })?;
@@ -501,6 +560,7 @@ fn spawn_receiver(
 
 /// 渲染主循环。
 fn render_loop(
+    diag: bool,
     win: &mut LayeredWindow,
     slot: &Arc<TelemetrySlot>,
     stop: &Arc<StopFlag>,
@@ -589,7 +649,11 @@ fn render_loop(
         // 弹窗在消失的那一帧也必须重绘一次，否则会残留在屏幕上
         let popup_active = drift.popup.popup.is_some() || prev_drift.popup.popup.is_some();
 
-        if !settings.perf.dirty_region_redraw {
+        if diag {
+            // 诊断模式下强制每帧上传：标记需要持续可见，
+            // 否则静止时脏区为空、标记根本不会上屏。
+            dirty.mark(full);
+        } else if !settings.perf.dirty_region_redraw {
             // 关掉脏区重绘时退化为「每帧全屏重绘」——即参考实现的行为。
             // 保留这个开关是为了能实测对比两种策略的开销。
             dirty.mark(full);
@@ -620,6 +684,9 @@ fn render_loop(
                 trail_pts.extend(trail.iter());
                 let hud = HudFrame::new(core_frame, drift, link, fps, uploads_before);
                 hud.paint(&mut painter, &trail_pts);
+            }
+            if diag {
+                draw_diag_markers(win.canvas_mut(), settings);
             }
             let uploaded = win.upload(Some(region))?;
             stat_pixels += uploaded;
