@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "fh6_hud"
+path = "src/lib.rs"
+
 [[bin]]
 name = "fh6-hud"
 path = "src/main.rs"
