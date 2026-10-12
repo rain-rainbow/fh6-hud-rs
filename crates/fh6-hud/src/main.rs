@@ -74,6 +74,7 @@ fh6-hud — FH6 轻量原生 HUD 叠加层
                              默认输出 hud-selftest.bmp
         --size <宽x高>       画布/窗口尺寸，默认取虚拟屏幕大小
         --no-topmost         不置顶（调试用）
+        --capture <文件>     接收若干帧后把真实绘制帧存成 BMP 并退出
         --diag               诊断模式：打印实测窗口/画布尺寸，并在四角画标记
     -h, --help               显示本帮助
     -V, --version            显示版本
@@ -109,6 +110,17 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Ok(Action::Capture(cfg)) => match run_capture(&cfg) {
+            Ok(path) => {
+                println!("已把真实绘制帧写出到: {path}");
+                println!("这是 HUD 真正上传到屏幕的那份像素，可用它离线核对几何与颜色。");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("抓帧失败: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Ok(Action::Run(cfg)) => match run_live(&cfg) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -131,6 +143,12 @@ struct Config {
     config_file: Option<String>,
     save_config: Option<String>,
     selftest_out: Option<String>,
+    /// `--capture <文件>`：接收若干帧后，把**真实绘制的那一帧**存成 BMP 并退出。
+    ///
+    /// 与 `--selftest` 的区别：selftest 用的是内置演示数据，capture 用的是
+    /// **实际收到的遥测**（没有数据时就是默认零值），且走的是与实时模式
+    /// 完全相同的绘制路径。用于把「屏幕上看到的」与「程序实际画的」区分开。
+    capture_out: Option<String>,
     size: Option<(i32, i32)>,
     no_topmost: bool,
     /// 诊断模式：打印实测尺寸并在四角画标记，用于核对窗口是否 1:1 映射。
@@ -144,6 +162,7 @@ impl Default for Config {
             config_file: None,
             save_config: None,
             selftest_out: None,
+            capture_out: None,
             size: None,
             no_topmost: false,
             diag: false,
@@ -156,6 +175,7 @@ enum Action {
     Help,
     Version,
     SelfTest(Config),
+    Capture(Config),
     Run(Config),
 }
 
@@ -191,6 +211,11 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
                     cfg.selftest_out = Some("hud-selftest.bmp".to_string());
                 }
             }
+            "--capture" => {
+                i += 1;
+                cfg.capture_out =
+                    Some(args.get(i).ok_or("--capture 需要一个输出文件路径")?.clone());
+            }
             "--size" => {
                 i += 1;
                 let v = args.get(i).ok_or("--size 需要 宽x高")?;
@@ -218,6 +243,8 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
     }
     Ok(if cfg.selftest_out.is_some() {
         Action::SelfTest(cfg)
+    } else if cfg.capture_out.is_some() {
+        Action::Capture(cfg)
     } else {
         Action::Run(cfg)
     })
@@ -429,6 +456,109 @@ fn draw_diag_markers(cv: &mut Canvas, settings: &Settings) {
         Rect::new(settings.angle.cx - 8.0, settings.angle.cy - 8.0, 16.0, 16.0),
         Bgra::rgb(0, 255, 128),
     );
+}
+
+/// 抓帧模式：接收若干帧遥测，把**真实绘制的那一帧**存成 BMP，然后退出。
+///
+/// # 与 `--selftest` 的区别
+///
+/// | | `--selftest` | `--capture` |
+/// |---|---|---|
+/// | 数据来源 | 内置演示数据 | **实际收到的遥测**（无数据时即默认零值） |
+/// | 绘制路径 | 与实时模式相同的 `HudFrame::paint` | 同上，另含 G 轨迹与判定器稳态 |
+/// | 需要开窗口 | 否 | **否** |
+///
+/// 两者都不创建窗口。`--capture` 的用途是：当「屏幕上看到的」与「预期画的」
+/// 不一致时，用它拿到程序**真正产出的那份像素**，从而把问题在
+/// 「绘制逻辑」与「窗口合成」之间切开。
+///
+/// 它会监听 `--listen` 指定的端口最多 3 秒；没收到包就用默认零值照常抓帧
+/// （此时画面会显示 NO DATA，与实时模式行为一致）。
+fn run_capture(cfg: &Config) -> Result<String, String> {
+    use std::net::UdpSocket;
+
+    let settings = load_settings(cfg);
+    let (cw, ch) = cfg.size.unwrap_or((1920, 1080));
+    let mut canvas = Canvas::new(cw, ch)?;
+    canvas.clear_transparent();
+
+    println!(
+        "监听 {} 最多 3 秒以获取真实遥测（没有数据也能照常抓帧）...",
+        cfg.listen
+    );
+    let mut latest: Option<Telemetry> = None;
+    let mut packet_count = 0u64;
+    match UdpSocket::bind(&cfg.listen) {
+        Ok(sock) => {
+            let _ = sock.set_read_timeout(Some(Duration::from_millis(300)));
+            let start = Instant::now();
+            let mut buf = [0u8; RECV_BUF];
+            let mut last_recv: Option<Instant> = None;
+            loop {
+                if start.elapsed() > Duration::from_secs(3) {
+                    break;
+                }
+                // 收到过包后，再等 0.5 秒没有新包就收尾
+                if let Some(t) = last_recv {
+                    if t.elapsed() > Duration::from_millis(500) {
+                        break;
+                    }
+                }
+                if let Ok((n, _)) = sock.recv_from(&mut buf) {
+                    if let Ok(t) = Telemetry::parse(&buf[..n]) {
+                        packet_count += 1;
+                        latest = Some(t);
+                        last_recv = Some(Instant::now());
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            println!("  [!] 无法绑定 {}（{e}），将用默认零值抓帧。", cfg.listen);
+            println!("      若 HUD 正在运行，这是正常的 —— 端口被它占着。");
+        }
+    }
+
+    let telemetry = latest.unwrap_or_default();
+    if packet_count > 0 {
+        println!("  收到 {packet_count} 个有效包，用最后一帧绘制。");
+    } else {
+        println!("  未收到有效包，用默认零值绘制（画面会显示 NO DATA / 全 0）。");
+    }
+
+    // 用真实遥测把判定器推进到稳态，使平滑值看起来与实际一致
+    let mut judge = DriftJudge::new();
+    let d = derived::derive(&telemetry);
+    let mut drift = DriftSnapshot::default();
+    for _ in 0..120 {
+        drift = judge.update(&telemetry, &d, 1.0 / 60.0);
+    }
+
+    // G 轨迹：用当前 G 值造一小段，让轨迹绘制也出现在抓帧里
+    let mut trail: TrailBuf<{ gauge::G_TRAIL_LEN }> = TrailBuf::new();
+    for i in 0..gauge::G_TRAIL_LEN {
+        let t = i as f32 / gauge::G_TRAIL_LEN as f32;
+        trail.push((
+            drift.g_lateral * (0.4 + 0.6 * t),
+            drift.g_longitudinal * (0.4 + 0.6 * t),
+        ));
+    }
+    let trail_pts: Vec<(f32, f32)> = trail.iter().collect();
+
+    {
+        let mut painter = HudPainter::new(&mut canvas, &settings, Theme::street());
+        painter.clear();
+        let hud = HudFrame::new(Frame::new(telemetry), drift, LinkState::NoData, 60.0, 0);
+        hud.paint(&mut painter, &trail_pts);
+    }
+
+    let out = cfg
+        .capture_out
+        .clone()
+        .unwrap_or_else(|| "hud-capture.bmp".to_string());
+    write_bmp(std::path::Path::new(&out), &canvas)?;
+    println!("  抓帧尺寸: {cw}x{ch}");
+    Ok(out)
 }
 
 /// 实时模式。
