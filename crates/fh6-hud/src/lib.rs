@@ -40,5 +40,7 @@
 #![warn(clippy::all)]
 
 pub mod gauge;
+pub mod settings;
 
 pub use gauge::{Bgra, DirtyRegion, Rect, Theme, TrailBuf};
+pub use settings::{Settings, SETTINGS_VERSION};
