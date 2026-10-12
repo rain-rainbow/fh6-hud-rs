@@ -333,8 +333,16 @@ impl Telemetry {
             (WHEEL_RL, self.wheel_rl),
             (WHEEL_RR, self.wheel_rr),
         ] {
-            wr_f32(&mut p, RawPacket::wheel_offset(TIRE_SLIP_RATIO, idx), w.slip_ratio);
-            wr_f32(&mut p, RawPacket::wheel_offset(TIRE_SLIP_ANGLE, idx), w.slip_angle);
+            wr_f32(
+                &mut p,
+                RawPacket::wheel_offset(TIRE_SLIP_RATIO, idx),
+                w.slip_ratio,
+            );
+            wr_f32(
+                &mut p,
+                RawPacket::wheel_offset(TIRE_SLIP_ANGLE, idx),
+                w.slip_angle,
+            );
             wr_f32(
                 &mut p,
                 RawPacket::wheel_offset(TIRE_COMBINED_SLIP, idx),
@@ -403,7 +411,11 @@ impl Telemetry {
         wr_u8(&mut p, HANDBRAKE, self.handbrake_raw);
         wr_u8(&mut p, GEAR, self.gear_raw);
         wr_i8(&mut p, STEER, self.steer_raw);
-        wr_i8(&mut p, NORMALIZED_DRIVING_LINE, self.normalized_driving_line);
+        wr_i8(
+            &mut p,
+            NORMALIZED_DRIVING_LINE,
+            self.normalized_driving_line,
+        );
         wr_i8(
             &mut p,
             NORMALIZED_AI_BRAKE_DIFFERENCE,

@@ -31,11 +31,12 @@
 | 模块 | 状态 | 说明 |
 |---|---|---|
 | `fh6-core` — 数据包解析 | ✅ 完成 | 324 字节包、88 字段、精确偏移表、派生量计算 |
-| `fh6-core` — 单元/集成测试 | ✅ 完成 | 30 个测试 |
+| `fh6-core` — 漂移状态机 | ✅ 完成 | FLOW / SPIN RISK / 反打 / 风格 / 事件弹窗，纯逻辑零分配 |
+| `fh6-core` — 单元/集成测试 | ✅ 完成 | 66 个测试 |
 | `fh6-relay` — UDP 分发器 | ✅ 完成 | 可用的命令行工具 |
-| `fh6-relay` — 端到端测试 | ✅ 完成 | 9 个真实 UDP 收发测试 |
+| `fh6-relay` — 端到端测试 | ✅ 完成 | 15 个真实 UDP 收发测试 |
 | `fh6-hud` — 窗口与渲染 | 🚧 未实现 | 仅有命令行骨架 |
-| `fh6-hud` — 漂移状态机 | 🚧 未实现 | — |
+| `fh6-hud` — 仪表绘制 | 🚧 未实现 | 状态机已就绪，等渲染层接入 |
 
 **当前可用的东西**：`fh6-relay` 已经可以编译运行，能实现在
 「飞智自适应扳机正常工作」的前提下，把遥测同时分发给任意多个本地程序。
@@ -101,7 +102,8 @@ FH6  Data Out ──►  127.0.0.1:5301   (fh6-relay 独占监听)
 │  ├── pack.rs      88 个字段的字节偏移常量 + 来源可信度标注 │
 │  ├── raw.rs       #[repr(C)] 结构体，作布局交叉验证        │
 │  ├── telemetry.rs 解析器（显式小端，全 crate forbid unsafe）│
-│  └── derived.rs   派生量：km/h、漂移角、G 值、输入百分比    │
+│  ├── derived.rs   派生量：km/h、漂移角、G 值、输入百分比    │
+│  └── drift.rs     漂移状态机：FLOW / RISK / 风格 / 事件    │
 └─────────────────────────────────────────────────────────┘
               ▲                              ▲
               │                              │
@@ -212,20 +214,21 @@ fh6-hud-rs/
 cargo test --workspace
 ```
 
-**47 个测试，全部不需要启动窗口或连接游戏**，整轮不到 1 秒。
+**84 个测试，全部不需要启动窗口或连接游戏**，整轮不到 1 秒。
 
 | 测试组 | 数量 | 覆盖内容 |
 |---|---|---|
 | `fh6-core` 单元测试 | 6 | 结构体大小 = 324、偏移量互不重叠、短包报错、超长包忽略尾部 |
 | `fh6-core` 派生量测试 | 21 | 单位换算、漂移角、G 值符号与钳制、输入百分比、NaN 兜底、编解码往返 |
+| `fh6-core` 漂移状态机测试 | 36 | 反打量公式、保持计时防抖、FLOW/风险标签边界、状态机优先级、弹窗优先级与抗重复续期、SPIN SAVE 武装→恢复→冷却时序、GOD/CAT 彩蛋、帧率无关性 |
 | `fh6-core` 文档测试 | 3 | 公开 API 的使用示例 |
 | `fh6-relay` 单元测试 | 7 | 默认端口、参数解析、等号写法、错误处理 |
 | `fh6-relay` 端到端测试 | 8 | **真实 UDP 收发**：多目标扇出、逐字节透明、多包、目标不可达容错、短包、端口占用报错 |
-| `fh6-hud` 单元测试 | 2 | 端口解析 |
+| `fh6-hud` 单元测试 | 3 | 端口解析 |
 
-### 开发中被测试抓到的两个真实缺陷
+### 开发中被测试抓到的缺陷
 
-这两个都是**测试先于修复发现**的，记录下来作为「为什么值得写测试」的实例：
+以下都是**测试先于修复发现**的，记录下来作为「为什么值得写测试」的实例：
 
 1. **横向 G 符号反了**。初版公式写成 `az*fx - ax*fz`，测试报出
    「右转得到 -1G」。定案为 `ax*fz - az*fx`（右转为正，ISO 8855 约定），
@@ -234,6 +237,16 @@ cargo test --workspace
    323 —— 差异全是**结构体尾部对齐填充**（含 `f32`/`i32`，对齐要求 4）。
    这正好解释了官方那句没人能解释的 `Total packet size: 324 bytes.`：
    **第 324 字节是编译器的对齐填充，不是字段。**
+3. **弹窗被无限续期**。状态机初版缺少「上一帧状态不同」守卫，
+   只要风格持续为 `LOCKED` 就会**每帧重新请求弹窗**，导致弹窗永不消失。
+   参考实现用 `last_style_label != "LOCKED"` 防重，此处等价实现。
+4. **测试脚手架自身的竞态**。relay 端到端测试初版先 `bind(0)` 取端口号、
+   再 `drop` 让 relay 绑同一个号，中间存在窗口被别人抢走，导致 relay 在线程里
+   静默 panic、表现为「5 个用例一起失败」。产品代码从头到尾都是对的 ——
+   修好脚手架（先占住再交接 + 轮询确认已绑定）后全部通过。
+5. **测试断言写错，而非代码错**。反打量测试初版断言 `> 50`，但按公式
+   30° / 60% 打方向的理论值是 44.17。诊断表逐角度核对后确认实现正确，
+   改成按公式断言。
 
 ---
 
@@ -318,11 +331,12 @@ the HUD renderer is not implemented yet.
 | Component | Status | Notes |
 |---|---|---|
 | `fh6-core` — packet parsing | ✅ Done | 324-byte packet, 88 fields, exact offset table, derived values |
-| `fh6-core` — tests | ✅ Done | 30 tests |
+| `fh6-core` — drift state machine | ✅ Done | FLOW / SPIN RISK / counter-steer / style / events; pure logic, zero allocation |
+| `fh6-core` — tests | ✅ Done | 66 tests |
 | `fh6-relay` — UDP fan-out | ✅ Done | Usable CLI tool |
-| `fh6-relay` — e2e tests | ✅ Done | 9 tests over real UDP sockets |
+| `fh6-relay` — e2e tests | ✅ Done | 15 tests over real UDP sockets |
 | `fh6-hud` — window & rendering | 🚧 Not implemented | CLI skeleton only |
-| `fh6-hud` — drift state machine | 🚧 Not implemented | — |
+| `fh6-hud` — gauge drawing | 🚧 Not implemented | State machine ready, awaiting the renderer |
 
 ### The problem it solves
 
@@ -406,9 +420,9 @@ Then in-game, under **Settings > HUD and Gameplay**:
 cargo test --workspace
 ```
 
-**47 tests, none of which need a GUI or a running game**, completing in under a second.
+**84 tests, none of which need a GUI or a running game**, completing in under a second.
 
-Two real defects were caught by tests during development:
+Five real defects were caught by tests during development:
 
 1. **Lateral G sign was inverted.** The first formula was `az*fx - ax*fz`; a test
    reported "right turn yields -1G". Settled as `ax*fz - az*fx` (right turn
@@ -417,6 +431,18 @@ Two real defects were caught by tests during development:
    **324**, not 323 — the extra byte is **struct tail padding** (the struct contains
    `f32`/`i32`, requiring 4-byte alignment). This explains the official
    `Total packet size: 324 bytes.`: **byte 324 is compiler padding, not a field.**
+3. **Popups were renewed forever.** The first state machine lacked a
+   "previous state differs" guard, so whenever the style stayed `LOCKED` it
+   re-requested the popup **every single frame**, keeping it on screen indefinitely.
+4. **A race in the test harness itself.** The relay e2e tests originally did
+   `bind(0)` to get a port, then `drop`ped it so the relay could bind the same
+   number — leaving a window for another process to steal it. The relay then
+   panicked silently inside its thread, showing up as "5 tests fail at once".
+   The production code was correct from the start.
+5. **A wrong assertion, not wrong code.** The counter-steer test asserted `> 50`,
+   but the formula's value at 30° with 60% steering is 44.17. Per-angle
+   verification confirmed the implementation; the assertion was corrected to
+   match the formula.
 
 ### Credits and licensing
 
