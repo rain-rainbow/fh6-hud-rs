@@ -72,7 +72,24 @@ impl Relay {
     /// 绑定监听地址并登记转发目标。
     pub fn bind(listen: SocketAddr, targets: &[(String, u16)]) -> io::Result<Self> {
         let socket = UdpSocket::bind(listen)?;
+        Self::from_socket(socket, targets)
+    }
 
+    /// 接管一个**已经绑定好**的套接字。
+    ///
+    /// # 为什么需要这个入口
+    ///
+    /// 「先 `bind(0)` 拿到端口号 → `drop` → 再绑同一个号」这种写法存在竞态窗口：
+    /// 端口一旦释放，别的进程/线程就可能抢走，随后绑定失败。
+    /// 在多线程测试里这个窗口会真实触发（本项目就遇到了：
+    /// 单独跑 8 个用例全过，并行跑时偶发失败）。
+    ///
+    /// 由调用方持有套接字并直接交给 relay，可以**彻底消除**这个窗口：
+    /// 端口从绑定到交接之间从未进入"空闲"状态。
+    ///
+    /// 注意这不影响 [`Relay::bind`] 的严格性 —— `SO_REUSEADDR` 的语义是
+    /// **绑定时刻**决定的，本函数不会放宽任何东西。
+    pub fn from_socket(socket: UdpSocket, targets: &[(String, u16)]) -> io::Result<Self> {
         let mut resolved = Vec::with_capacity(targets.len());
         for (host, port) in targets {
             // 这里只做字面量解析；主机名解析在调用方完成（见 main.rs 的 cli）。

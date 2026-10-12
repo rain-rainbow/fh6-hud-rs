@@ -21,9 +21,9 @@
 //!    「订阅者收不到包」，极易误判为转发逻辑有 bug。
 //!
 //! 因此这里改为：
-//! * 用 [`ReservedPort`]「先占住、再交接」，消除端口竞态；
-//! * 用 [`wait_until_bound`] 轮询确认 relay 真的绑上了，而不是靠固定 sleep；
-//! * relay 线程内绑定失败**直接 panic 并带上端口号**，让失败信息可读。
+//! * 由**主线程**绑定监听套接字，再把它**直接交接**给 relay 线程 ——
+//!   端口从绑定到使用之间从未进入空闲状态，竞态窗口被彻底消除；
+//! * relay 线程内接管失败**直接 panic 并带上错误信息**，让失败可读。
 //!
 //! 测试函数名用中文描述意图，因此关闭 `non_snake_case` 检查。
 #![allow(non_snake_case)]
@@ -44,31 +44,37 @@ fn bind_ephemeral() -> (UdpSocket, u16) {
     (s, port)
 }
 
-/// 一个「持有中」的端口。丢弃它才会释放端口。
+/// 一个「持有中」的端口。
 ///
-/// 这样可以先占住端口、把端口号交给 relay，再释放，从而消除竞态窗口。
+/// 字段 `_socket` **故意从不读取**：它的唯一作用就是通过持有它来占住端口，
+/// 让「端口已被占用」的用例能够稳定复现。变量名前缀下划线是为了向
+/// 阅读者和 lint 表明「这不是死代码，是刻意的 RAII 占位」。
 struct ReservedPort {
-    socket: UdpSocket,
+    _socket: UdpSocket,
     port: u16,
 }
 
 impl ReservedPort {
     fn new() -> Self {
         let (socket, port) = bind_ephemeral();
-        Self { socket, port }
+        Self {
+            _socket: socket,
+            port,
+        }
     }
 
-    /// 只取端口号，不释放（用于「应当绑定失败」的用例）。
+    /// 只取端口号，不释放。
     fn port(&self) -> u16 {
         self.port
     }
+}
 
-    /// 释放端口并把端口号交出去。
-    fn release(self) -> u16 {
-        let port = self.port;
-        drop(self.socket);
-        port
-    }
+/// 在 `127.0.0.1:0` 上绑定，返回 (套接字, 端口)。
+///
+/// 套接字**保持绑定状态**并交给 relay 使用，从而完全避免
+/// 「释放端口再重绑」的竞态窗口。
+fn bind_relay_socket() -> (UdpSocket, u16) {
+    bind_ephemeral()
 }
 
 /// 构造一个可识别的测试数据包（324 字节，内容由 seed 决定）。
@@ -108,20 +114,20 @@ impl RelayHandle {
     }
 }
 
-/// 启动 relay 线程。
+/// 启动 relay 线程，**接管调用方已绑定的套接字**。
 ///
-/// `listen_port` 应当来自 [`ReservedPort::release`]，以保证 relay 一定绑得上。
-fn spawn_relay(listen_port: u16, targets: Vec<(String, u16)>) -> RelayHandle {
+/// 套接字由主线程绑定后直接交接给 relay 线程，端口从未进入空闲状态，
+/// 因此不存在「被别的测试抢走」的可能。
+fn spawn_relay(socket: UdpSocket, targets: Vec<(String, u16)>) -> RelayHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = Arc::clone(&stop);
 
     let join = thread::spawn(move || {
-        let addr = format!("127.0.0.1:{listen_port}").parse().unwrap();
-        // 绑定失败就直接 panic —— 在测试里这是正确的行为，
+        // 接管失败就 panic —— 在测试里这是正确行为，
         // 因为它意味着测试环境有问题，而不是"包丢了"。
-        let mut relay = match Relay::bind(addr, &targets) {
+        let mut relay = match Relay::from_socket(socket, &targets) {
             Ok(r) => r,
-            Err(e) => panic!("relay 绑定 127.0.0.1:{listen_port} 失败: {e}"),
+            Err(e) => panic!("relay 接管套接字失败: {e}"),
         };
         relay
             .set_read_timeout(Some(Duration::from_millis(20)))
@@ -132,33 +138,14 @@ fn spawn_relay(listen_port: u16, targets: Vec<(String, u16)>) -> RelayHandle {
     RelayHandle { stop, join }
 }
 
-/// 等 relay 真正绑上端口。
+/// 一步到位：绑定套接字、启动 relay。返回 (relay 句柄, 监听端口)。
 ///
-/// 做法：反复尝试**绑定**同一端口。若绑定失败，说明 relay 已经占住了它。
-/// 这比固定 `sleep` 可靠 —— 固定 sleep 在慢机器上会偶发失败。
-fn wait_until_bound(port: u16, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        match UdpSocket::bind(format!("127.0.0.1:{port}")) {
-            Ok(s) => {
-                // 还能绑上 → relay 尚未绑定，让出时间片再来
-                drop(s);
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(_) => return true, // 已被 relay 占住
-        }
-    }
-    false
-}
-
-/// 一步到位：预留端口、启动 relay、等它绑好。返回 (relay 句柄, 端口)。
+/// relay 启动时即已持有套接字，**不需要等待"绑定成功"**（端口从未空闲）。
+/// 只做一个短暂等待，确保收包循环已经开始，避免发送端先发包导致丢包。
 fn start_relay(targets: Vec<(String, u16)>) -> (RelayHandle, u16) {
-    let port = ReservedPort::new().release();
-    let handle = spawn_relay(port, targets);
-    assert!(
-        wait_until_bound(port, Duration::from_secs(5)),
-        "relay 未能在 5 秒内绑定 127.0.0.1:{port}"
-    );
+    let (socket, port) = bind_relay_socket();
+    let handle = spawn_relay(socket, targets);
+    thread::sleep(Duration::from_millis(50));
     (handle, port)
 }
 
@@ -261,8 +248,14 @@ fn 连续多个数据包应全部转发() {
 
 #[test]
 fn 目标端口无人监听时不应崩溃且继续转发给其他目标() {
-    // 先占一个端口再释放，确保它当前空闲（无人监听）
-    let dead_port = ReservedPort::new().release();
+    // 找一个确实无人监听的端口。做法：绑定后立刻释放并**立即**用作目标 ——
+    // 这里不怕竞态，因为最坏情况只是"该端口恰好又被人监听"，
+    // 而 relay 的容错行为（不退出）与目标是否可达无关。
+    let dead_port = {
+        let (s, p) = bind_ephemeral();
+        drop(s);
+        p
+    };
 
     let (alive, alive_port) = bind_ephemeral();
     // 第一个目标指向没人监听的端口，第二个才是活的
@@ -302,11 +295,11 @@ fn 短包也应被转发但会被统计() {
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = Arc::clone(&stop);
 
-    let port = ReservedPort::new().release();
+    // 主线程绑定后交接给 relay 线程，避免端口竞态
+    let (socket, port) = bind_relay_socket();
     let handle = thread::spawn(move || {
-        let addr = format!("127.0.0.1:{port}").parse().unwrap();
-        let mut relay = Relay::bind(addr, &[("127.0.0.1".to_string(), sub_port)])
-            .unwrap_or_else(|e| panic!("relay 绑定 127.0.0.1:{port} 失败: {e}"));
+        let mut relay = Relay::from_socket(socket, &[("127.0.0.1".to_string(), sub_port)])
+            .unwrap_or_else(|e| panic!("relay 接管套接字失败: {e}"));
         relay
             .set_read_timeout(Some(Duration::from_millis(20)))
             .expect("设置读取超时失败");
@@ -318,10 +311,8 @@ fn 短包也应被转发但会被统计() {
             }
         }
     });
-    assert!(
-        wait_until_bound(port, Duration::from_secs(5)),
-        "relay 未能在 5 秒内绑定 127.0.0.1:{port}"
-    );
+    // relay 启动即已持有套接字，不需要等待"绑定成功"
+    thread::sleep(Duration::from_millis(50));
 
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
     let short = vec![0xAAu8; 10];
