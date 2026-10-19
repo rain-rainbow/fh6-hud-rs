@@ -324,23 +324,30 @@ fn stop(state: State<'_, AppState>, which: String) -> Result<String, String> {
 /// 在资源管理器里打开日志所在目录。
 #[tauri::command]
 fn open_log_dir(config: AppConfig) -> Result<(), String> {
-    let p = Path::new(&config.logging.path);
-    let dir = p.parent().filter(|d| !d.as_os_str().is_empty());
-    let target = match dir {
-        Some(d) => {
-            if d.is_absolute() {
-                d.to_path_buf()
-            } else {
-                std::env::current_dir().unwrap_or_default().join(d)
-            }
-        }
-        None => std::env::current_dir().unwrap_or_default(),
-    };
+    // 基准目录取 **HUD 可执行文件所在目录**，而不是 GUI 自己的目录，也不是
+    // 当前工作目录：日志是子进程写的，用子进程的目录才能指对地方。
+    let hud_exe = resolve_exe(&config.apps.hud_exe, "fh6-hud");
+    let base = hud_exe
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let target = config.logging.resolved_path_from(&base);
+    let target = target
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or(target);
     let _ = std::fs::create_dir_all(&target);
     #[cfg(windows)]
     {
-        Command::new("explorer")
-            .arg(target.as_os_str())
+        // 用 shell（`start`）打开目录，**不要**直接 `CreateProcess("explorer.exe")`。
+        //
+        // 实测（本机 Win10 19045）：直接启动 explorer 会以 0xc0000142
+        // （STATUS_DLL_INIT_FAILED）退出，并弹出「应用程序无法正常启动」对话框 ——
+        // 因为已有 shell 在运行，新起的 explorer 需要走「转交给现有 shell」的路径，
+        // 直接创建进程会失败。`start` 内部走 ShellExecute，不会新建 explorer 进程。
+        let dir_str = target.to_string_lossy().to_string();
+        Command::new("cmd")
+            .args(["/c", "start", "", &dir_str])
             .spawn()
             .map_err(|e| format!("打开目录失败: {e}"))?;
     }

@@ -197,7 +197,7 @@
         </div>
         <div class="field">
           <label for="log-path">文件路径</label>
-          <input id="log-path" type="text" data-path="logging.path" />
+          <input id="log-path" type="text" data-path="logging.path" placeholder="logs/fh6.log（相对路径按 exe 目录解析）" />
         </div>
         <div class="field">
           <label for="log-size">单文件上限（KB）</label>
@@ -210,6 +210,10 @@
         <div class="field check">
           <label for="log-console">同时输出到控制台</label>
           <input id="log-console" type="checkbox" data-path="logging.console" />
+        </div>
+        <div class="field check">
+          <label for="log-percomp">HUD 与 relay 各写独立文件（推荐）</label>
+          <input id="log-percomp" type="checkbox" data-path="logging.per_component" />
         </div>
       </div>
     </section>

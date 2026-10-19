@@ -87,7 +87,11 @@ impl LogLevel {
 pub struct LogConfig {
     /// 是否写文件。关闭时完全不做文件 I/O。
     pub enabled: bool,
-    /// 日志文件路径。相对路径按**进程工作目录**解析。
+    /// 日志文件路径。
+    ///
+    /// **相对路径不按工作目录解析，而是按可执行文件所在目录解析**
+    /// （见 [`LogConfig::resolved_path`]）。原因：同一个程序用不同方式启动时
+    /// 工作目录会变，日志就会散落到不同位置，排查问题时反而找不到文件。
     pub path: String,
     /// 级别。
     pub level: LogLevel,
@@ -97,18 +101,27 @@ pub struct LogConfig {
     pub keep_files: u32,
     /// 是否同时输出到控制台（stdout）。
     pub console: bool,
+    /// 是否让每个组件写**各自的**文件。
+    ///
+    /// 默认 `true`：基础名 `logs/fh6.log` 会派生出
+    /// `logs/fh6-hud.log` 与 `logs/fh6-relay.log`。
+    ///
+    /// 为什么要分开：HUD 与 relay 是两个进程，同时往一个文件追加会让行交错，
+    /// 而且各自的轮转逻辑会互相干扰（都以为自己是唯一写者）。
+    pub per_component: bool,
 }
 
 impl Default for LogConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            path: "logs/fh6-hud.log".to_string(),
+            path: "logs/fh6.log".to_string(),
             level: LogLevel::Info,
             // 8 MB × (3+1) = 32 MB 上界，对日志来说足够且不会失控
             max_bytes: 8 * 1024 * 1024,
             keep_files: 3,
             console: true,
+            per_component: true,
         }
     }
 }
@@ -121,7 +134,7 @@ impl LogConfig {
         let before = self.clone();
         let p = self.path.trim();
         if p.is_empty() || p.len() > 512 {
-            self.path = "logs/fh6-hud.log".to_string();
+            self.path = "logs/fh6.log".to_string();
         } else {
             self.path = p.to_string();
         }
@@ -131,12 +144,69 @@ impl LogConfig {
         *self != before
     }
 
-    /// 日志文件所在目录（不存在则返回当前目录）。
+    /// 把 `path` 解析成**绝对路径**。
+    ///
+    /// * 绝对路径：原样返回；
+    /// * 相对路径：按**可执行文件所在目录**解析（不是工作目录）。
+    ///
+    /// 这条规则让「日志到底在哪」不再取决于用户怎么启动程序，也让 GUI 的
+    /// 「打开日志目录」与两个子进程的实际写入位置永远一致。
+    pub fn resolved_path(&self) -> PathBuf {
+        let base = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_default();
+        self.resolved_path_from(&base)
+    }
+
+    /// 以指定目录为基准解析相对路径。
+    ///
+    /// GUI 用它把日志定位到**子进程**所在目录（而不是 GUI 自己的目录）——
+    /// 三个程序不在同一文件夹时，只有这样才能指对地方。
+    pub fn resolved_path_from(&self, base: &Path) -> PathBuf {
+        let p = Path::new(&self.path);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            base.join(p)
+        }
+    }
+
+    /// 日志文件所在目录（已解析为绝对路径）。
     pub fn dir(&self) -> PathBuf {
-        Path::new(&self.path)
+        self.resolved_path()
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// 生成某个组件专属的日志配置（在文件名里插入组件名）。
+    ///
+    /// 例：`logs/fh6.log` + 组件 `relay` → `logs/fh6-relay.log`。
+    /// `per_component` 为 `false` 时原样返回（两个组件共用一个文件）。
+    pub fn for_component(&self, component: &str) -> LogConfig {
+        let mut out = self.clone();
+        if !self.per_component || component.is_empty() {
+            return out;
+        }
+        let p = Path::new(&self.path);
+        let stem = p
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "fh6-hud".to_string());
+        // 已经带过组件名就不重复追加
+        if stem.ends_with(&format!("-{component}")) {
+            return out;
+        }
+        let mut name = format!("{stem}-{component}");
+        if let Some(ext) = p.extension() {
+            name.push('.');
+            name.push_str(&ext.to_string_lossy());
+        }
+        let mut new_path = p.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+        new_path.push(name);
+        out.path = new_path.to_string_lossy().to_string();
+        out
     }
 }
 
@@ -247,7 +317,8 @@ impl Logger {
 
 /// 打开（并准备追加）日志文件，同时报告当前大小。
 fn open_log_file(cfg: &LogConfig) -> Option<(File, u64)> {
-    let path = Path::new(&cfg.path);
+    let resolved = cfg.resolved_path();
+    let path = resolved.as_path();
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
             let _ = fs::create_dir_all(dir);
@@ -264,7 +335,8 @@ fn open_log_file(cfg: &LogConfig) -> Option<(File, u64)> {
 
 /// 轮转：`x.log` → `x.log.1` → …，超过 `keep_files` 的丢弃。
 fn rotate(cfg: &LogConfig) -> Option<(File, u64)> {
-    let path = Path::new(&cfg.path);
+    let resolved = cfg.resolved_path();
+    let path = resolved.as_path();
     // 先把最旧的删掉
     if cfg.keep_files > 0 {
         for i in (1..=cfg.keep_files).rev() {
@@ -309,7 +381,9 @@ pub fn format_utc(secs: u64) -> String {
     let rem = secs % 86_400;
     let (y, m, d) = civil_from_days(days);
     let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}")
+    // 末尾的 `Z` 明确表示 UTC：本 crate 不允许 unsafe，取不到本地时区偏移，
+    // 与其悄悄按 UTC 写却不说明，不如标注清楚。
+    format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}Z")
 }
 
 /// 自 1970-01-01 起的天数 → (年, 月, 日)。
@@ -375,21 +449,21 @@ mod tests {
     #[test]
     fn 时间戳格式正确() {
         // 1970-01-01 00:00:00 UTC
-        assert_eq!(format_utc(0), "1970-01-01 00:00:00");
+        assert_eq!(format_utc(0), "1970-01-01 00:00:00Z");
         // 2000-01-01 00:00:00 UTC = 946684800
-        assert_eq!(format_utc(946_684_800), "2000-01-01 00:00:00");
+        assert_eq!(format_utc(946_684_800), "2000-01-01 00:00:00Z");
         // 2024-02-29 12:34:56 UTC（闰日）= 1709210096
-        assert_eq!(format_utc(1_709_210_096), "2024-02-29 12:34:56");
+        assert_eq!(format_utc(1_709_210_096), "2024-02-29 12:34:56Z");
         // 2026-10-19 00:00:00 UTC = 1792368000
-        assert_eq!(format_utc(1_792_368_000), "2026-10-19 00:00:00");
+        assert_eq!(format_utc(1_792_368_000), "2026-10-19 00:00:00Z");
     }
 
     #[test]
     fn 闰年边界正确() {
         // 2024-03-01 00:00:00 UTC = 1709251200
-        assert_eq!(format_utc(1_709_251_200), "2024-03-01 00:00:00");
+        assert_eq!(format_utc(1_709_251_200), "2024-03-01 00:00:00Z");
         // 2100 不是闰年
-        assert_eq!(format_utc(4_107_542_400), "2100-03-01 00:00:00");
+        assert_eq!(format_utc(4_107_542_400), "2100-03-01 00:00:00Z");
     }
 
     #[test]
@@ -400,12 +474,96 @@ mod tests {
     }
 
     #[test]
-    fn 日志目录取自路径父目录() {
+    fn 相对路径按可执行文件目录解析() {
+        // 关键行为：相对路径不按工作目录解析，而是按 exe 所在目录，
+        // 这样无论从哪里启动，日志都在同一个地方。
         let c = LogConfig {
             path: "some/dir/a.log".to_string(),
             ..Default::default()
         };
-        assert_eq!(c.dir(), PathBuf::from("some/dir"));
+        let resolved = c.resolved_path();
+        assert!(
+            resolved.is_absolute(),
+            "解析结果必须是绝对路径: {resolved:?}"
+        );
+        assert!(resolved.ends_with(Path::new("some/dir/a.log")));
+        assert_eq!(c.dir(), resolved.parent().unwrap());
+    }
+
+    #[test]
+    fn 绝对路径原样返回() {
+        let abs = if cfg!(windows) {
+            "C:/logs/x.log"
+        } else {
+            "/var/log/x.log"
+        };
+        let c = LogConfig {
+            path: abs.to_string(),
+            ..Default::default()
+        };
+        assert_eq!(c.resolved_path(), PathBuf::from(abs));
+        assert_eq!(
+            c.resolved_path_from(Path::new("D:/base")),
+            PathBuf::from(abs),
+            "绝对路径不应受基准目录影响"
+        );
+    }
+
+    #[test]
+    fn 按指定基准目录解析相对路径() {
+        let c = LogConfig {
+            path: "logs/a.log".to_string(),
+            ..Default::default()
+        };
+        let base = Path::new("E:/app");
+        assert_eq!(c.resolved_path_from(base), Path::new("E:/app/logs/a.log"));
+    }
+
+    #[test]
+    fn 组件专属日志文件名正确() {
+        let c = LogConfig {
+            path: "logs/fh6.log".to_string(),
+            ..Default::default()
+        };
+        let hud = c.for_component("hud");
+        let relay = c.for_component("relay");
+        assert_eq!(Path::new(&hud.path), Path::new("logs/fh6-hud.log"));
+        assert_eq!(Path::new(&relay.path), Path::new("logs/fh6-relay.log"));
+        assert_ne!(hud.path, relay.path, "两个组件必须写不同文件");
+        // 重复调用不应叠加后缀
+        assert_eq!(
+            Path::new(&relay.for_component("relay").path),
+            Path::new(&relay.path)
+        );
+    }
+
+    #[test]
+    fn 关闭分组件时共用同一文件() {
+        let c = LogConfig {
+            path: "logs/one.log".to_string(),
+            per_component: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            Path::new(&c.for_component("hud").path),
+            Path::new("logs/one.log")
+        );
+        assert_eq!(
+            Path::new(&c.for_component("relay").path),
+            Path::new("logs/one.log")
+        );
+    }
+
+    #[test]
+    fn 无扩展名的路径也能分组件() {
+        let c = LogConfig {
+            path: "logs/app".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            Path::new(&c.for_component("hud").path),
+            Path::new("logs/app-hud")
+        );
     }
 
     #[test]
@@ -453,6 +611,7 @@ mod tests {
             // 最小值 4 KB；写够多行必然触发轮转
             max_bytes: 4096,
             keep_files: 2,
+            per_component: false,
         };
         cfg.sanitize();
         let logger = Logger::new(&cfg);
@@ -537,7 +696,7 @@ mod tests {
             ..Default::default()
         };
         c.sanitize();
-        assert_eq!(c.path, "logs/fh6-hud.log");
+        assert_eq!(c.path, "logs/fh6.log");
     }
 
     #[test]
@@ -549,6 +708,7 @@ mod tests {
             max_bytes: 1234,
             keep_files: 5,
             console: false,
+            per_component: true,
         };
         let json = serde_json::to_string(&c).unwrap();
         let back: LogConfig = serde_json::from_str(&json).unwrap();

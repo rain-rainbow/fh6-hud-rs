@@ -198,8 +198,19 @@ impl AppConfig {
     }
 
     /// 用本配置初始化全局日志器，并记录一条启动信息。
-    pub fn init_logging(&self, who: &str) {
-        let logger = crate::logging::Logger::init(&self.logging);
+    ///
+    /// `who` 形如 `fh6-hud` / `fh6-relay`；取后缀作为组件名，用于生成
+    /// **各自的**日志文件（见 [`LogConfig::for_component`]）。
+    ///
+    /// 返回实际使用的日志配置（路径可能已因组件名而改变），供调用方打印
+    /// 「日志写到哪」，省得用户到处找。
+    pub fn init_logging(&self, who: &str) -> LogConfig {
+        let role = who.strip_prefix("fh6-").unwrap_or(who);
+        let log_cfg = self.logging.for_component(role);
+        let logger = crate::logging::Logger::init(&log_cfg);
+        if log_cfg.enabled {
+            logger.info(&format!("日志文件: {}", log_cfg.resolved_path().display()));
+        }
         logger.info(&format!(
             "=== {who} 启动 === 配置版本 {} hud={} relay={} 目标数={} 日志级别={}",
             self.version,
@@ -208,6 +219,7 @@ impl AppConfig {
             self.relay.enabled_count(),
             self.logging.level.as_str()
         ));
+        log_cfg
     }
 }
 

@@ -518,6 +518,12 @@ fn run_capture(cfg: &Config) -> Result<String, String> {
 
     let app = load_app_config(cfg);
     let settings = app.hud.clone();
+    // 抓帧模式也初始化日志：诊断场景恰恰最需要一份记录
+    // （例如「为什么抓到的帧里没有数据」可以回看当时绑定了哪个端点）。
+    let log_cfg = app.init_logging("fh6-hud");
+    if log_cfg.enabled {
+        println!("日志文件: {}", log_cfg.resolved_path().display());
+    }
     let (cw, ch) = cfg.size.unwrap_or((1920, 1080));
     let mut canvas = Canvas::new(cw, ch)?;
     canvas.clear_transparent();
@@ -606,7 +612,10 @@ fn run_live(cfg: &Config) -> Result<(), String> {
     let endpoint = listen_endpoint(cfg, &app);
 
     // ---- 0. 初始化日志（配置里没开启就什么也不做）----
-    app.init_logging("fh6-hud");
+    let log_cfg = app.init_logging("fh6-hud");
+    if log_cfg.enabled {
+        println!("日志文件: {}", log_cfg.resolved_path().display());
+    }
     let log = fh6_config::Logger::global();
     log.info(&format!(
         "外观: 语言={} 面板透明度={:.2} G表底衬={:.2} 弹窗底衬={:.2}",

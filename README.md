@@ -230,7 +230,7 @@ fh6-relay --listen 127.0.0.1:5401 --to 127.0.0.1:5302
       { "enabled": true, "host": "127.0.0.1", "port": 5302, "label": "HUD" }
     ]
   },
-  "logging": { "enabled": false, "path": "logs/fh6-hud.log", "level": "info" },
+  "logging": { "enabled": false, "path": "logs/fh6.log", "level": "info" },
   "apps": { "auto_start": false, "close_to_tray": true }
 }
 ```

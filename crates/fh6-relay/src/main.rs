@@ -229,7 +229,10 @@ fn run(cli: CliConfig) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ---- 3. 初始化日志 ----
-    app.init_logging("fh6-relay");
+    let log_cfg = app.init_logging("fh6-relay");
+    if log_cfg.enabled {
+        println!("日志文件: {}", log_cfg.resolved_path().display());
+    }
     let log = fh6_config::Logger::global();
 
     let listen_ip = app.relay.listen_ip.clone();
