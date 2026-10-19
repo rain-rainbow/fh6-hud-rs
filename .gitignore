@@ -29,3 +29,6 @@ node_modules/
 # 本地部署目录（打包好的 exe 与 WebView2 用户数据，不应入库）
 exe/
 webview2-data/
+
+# 编辑器/手工备份
+*.bak
