@@ -37,7 +37,7 @@ use fh6_config::AppConfig;
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 /// 配置文件默认文件名（与 `fh6_config::app::DEFAULT_FILE_NAME` 一致）。
 const CONFIG_NAME: &str = "fh6-hud.config.json";
@@ -54,6 +54,8 @@ pub struct AppState {
     children: Mutex<HashMap<String, Child>>,
     /// 关闭窗口时是否收到托盘（由配置同步而来）。
     close_to_tray: AtomicBool,
+    /// 最小化前是否先询问（由配置同步而来）。
+    confirm_close: AtomicBool,
 }
 
 /// 供界面显示的运行状态。
@@ -152,6 +154,9 @@ fn load_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
     state
         .close_to_tray
         .store(cfg.apps.close_to_tray, Ordering::Relaxed);
+    state
+        .confirm_close
+        .store(cfg.apps.confirm_close, Ordering::Relaxed);
     Ok(cfg)
 }
 
@@ -168,6 +173,9 @@ fn save_config(state: State<'_, AppState>, mut config: AppConfig) -> Result<(), 
     state
         .close_to_tray
         .store(config.apps.close_to_tray, Ordering::Relaxed);
+    state
+        .confirm_close
+        .store(config.apps.confirm_close, Ordering::Relaxed);
     Ok(())
 }
 
@@ -322,6 +330,23 @@ fn stop(state: State<'_, AppState>, which: String) -> Result<String, String> {
     } else {
         Ok(format!("已停止: {}", stopped.join(" + ")))
     }
+}
+
+/// 隐藏主窗口（收到托盘）。
+///
+/// 由前端的「关闭确认层」调用，而不是在窗口事件里直接隐藏 ——
+/// 这样用户能先看到「程序会继续在后台运行」这件事。
+#[tauri::command]
+fn hide_to_tray(window: tauri::Window) -> Result<(), String> {
+    window.hide().map_err(|e| format!("隐藏窗口失败: {e}"))
+}
+
+/// 真正退出：先停掉所有子进程，避免 HUD 残留在屏幕上。
+#[tauri::command]
+fn quit_app(app: AppHandle) -> Result<(), String> {
+    stop_all(&app);
+    app.exit(0);
+    Ok(())
 }
 
 /// 在资源管理器里打开日志所在目录。
@@ -491,6 +516,7 @@ pub fn run() {
             config_path: Mutex::new(default_config_path()),
             children: Mutex::new(HashMap::new()),
             close_to_tray: AtomicBool::new(true),
+            confirm_close: AtomicBool::new(true),
         })
         .invoke_handler(tauri::generate_handler![
             config_path,
@@ -501,6 +527,8 @@ pub fn run() {
             status,
             start,
             stop,
+            hide_to_tray,
+            quit_app,
             open_log_dir
         ])
         .setup(|app| {
@@ -522,6 +550,9 @@ pub fn run() {
             state
                 .close_to_tray
                 .store(cfg.apps.close_to_tray, Ordering::Relaxed);
+            state
+                .confirm_close
+                .store(cfg.apps.confirm_close, Ordering::Relaxed);
             if cfg.apps.auto_start {
                 let _ = start(app.state::<AppState>(), cfg, "all".to_string());
             }
@@ -530,16 +561,27 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
-                let to_tray = app
-                    .state::<AppState>()
-                    .close_to_tray
-                    .load(Ordering::Relaxed);
-                if to_tray {
-                    // 收到托盘而不是退出：这是「后台常驻」的预期行为
-                    api.prevent_close();
-                    let _ = window.hide();
-                } else {
+                let state = app.state::<AppState>();
+                let to_tray = state.close_to_tray.load(Ordering::Relaxed);
+                let confirm = state.confirm_close.load(Ordering::Relaxed);
+                if !to_tray {
+                    // 配置为「关闭即退出」
                     stop_all(app);
+                    return;
+                }
+                // 一律先拦下关闭：真正的隐藏由前端确认层调用 hide_to_tray。
+                //
+                // 之所以不在这里直接 hide：用户看不到托盘图标（Win10 把它收进
+                // 任务栏的 ^ 折叠区）时会以为程序已经退出，这正是最初反馈的问题。
+                // 让前端弹一次明确的二选一，比任何暗示都直接。
+                api.prevent_close();
+                if confirm {
+                    // 保持窗口可见，由前端显示确认层
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                    let _ = app.emit("close-requested", ());
+                } else {
+                    let _ = window.hide();
                 }
             }
         })

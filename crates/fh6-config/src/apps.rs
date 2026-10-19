@@ -19,6 +19,14 @@ pub struct AppsConfig {
     ///
     /// 默认 `true`：用户要的是「后台常驻」，误点关闭不应该把 HUD 一起关掉。
     pub close_to_tray: bool,
+    /// 最小化到托盘前是否先询问一次。
+    ///
+    /// 默认 `true`。起因是实际反馈：「关闭窗口也没有托盘」—— 用户看不到
+    /// 托盘图标（Win10 默认把它收进任务栏的 ^ 折叠区），于是以为程序已退出。
+    /// 关闭时弹一次明确的二选一（最小化 / 退出）比暗示有效得多。
+    ///
+    /// 设成 `false` 后关闭即静默最小化。
+    pub confirm_close: bool,
 }
 
 impl Default for AppsConfig {
@@ -28,6 +36,7 @@ impl Default for AppsConfig {
             relay_exe: String::new(),
             auto_start: false,
             close_to_tray: true,
+            confirm_close: true,
         }
     }
 }
@@ -95,6 +104,7 @@ mod tests {
             relay_exe: "C:/a/fh6-relay.exe".to_string(),
             auto_start: true,
             close_to_tray: false,
+            confirm_close: false,
         };
         let json = serde_json::to_string(&a).unwrap();
         let back: AppsConfig = serde_json::from_str(&json).unwrap();

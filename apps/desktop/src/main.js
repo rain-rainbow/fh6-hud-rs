@@ -37,6 +37,28 @@ function toast(msg, kind = 'ok') {
   toast._t = setTimeout(() => { el.className = 'toast'; }, 3200);
 }
 
+// 常驻动作消息（不自动消失）。
+//
+// 与 toast 的分工：toast 只用于「已保存」这类一眼即知的结果；
+// **失败**必须留在界面上 —— 启动失败的原因（找不到 exe、端口被占）
+// 需要用户能反复阅读，弹一下就消失等于没提示。
+function setActionMsg(text, kind = '') {
+  const el = document.getElementById('action-msg');
+  if (!text) {
+    el.hidden = true;
+    el.textContent = '';
+    el.className = 'action-msg';
+    return;
+  }
+  el.hidden = false;
+  el.textContent = text;
+  el.className = `action-msg ${kind}`;
+}
+
+function looksLikeError(text) {
+  return /失败|错误|找不到|拒绝|占用|already|error/i.test(text);
+}
+
 const OUT_IDS = {
   scale: 'scale-out', offx: 'offx-out', offy: 'offy-out',
   'op-input': 'op-input-out', 'op-slip': 'op-slip-out', 'op-flow': 'op-flow-out',
@@ -271,10 +293,12 @@ function bind() {
     try {
       await save(false, false); // 先落盘，子进程读的是文件；此处不自动重启
       const msg = await invoke('start', { config: collectForm(), which: 'all' });
-      toast(msg);
+      // 部分成功（例如 relay 起来了、HUD 失败）也要留在界面上
+      if (looksLikeError(msg)) setActionMsg(`启动结果：${msg}`, 'warn');
+      else setActionMsg(`启动结果：${msg}`, 'ok');
       await refreshStatus();
     } catch (e) {
-      toast(`启动失败：${e}`, 'err');
+      setActionMsg(`启动失败：${e}`, 'err');
       await refreshStatus();
     }
   });
@@ -284,20 +308,21 @@ function bind() {
       await save(false, false); // 先确保磁盘上是最新配置
       await invoke('stop', { which: 'all' });
       const msg = await invoke('start', { config: collectForm(), which: 'all' });
-      toast(msg);
+      if (looksLikeError(msg)) setActionMsg(`重启结果：${msg}`, 'warn');
+      else setActionMsg(`重启结果：${msg}`, 'ok');
       await refreshStatus();
     } catch (e) {
-      toast(`重启失败：${e}`, 'err');
+      setActionMsg(`重启失败：${e}`, 'err');
       await refreshStatus();
     }
   });
   document.getElementById('btn-stop').addEventListener('click', async () => {
     try {
       const msg = await invoke('stop', { which: 'all' });
-      toast(msg);
+      setActionMsg(msg, 'ok');
       await refreshStatus();
     } catch (e) {
-      toast(`停止失败：${e}`, 'err');
+      setActionMsg(`停止失败：${e}`, 'err');
     }
   });
 
@@ -329,8 +354,51 @@ function bind() {
   });
 }
 
+// 关闭确认层：由 Rust 侧在收到 CloseRequested 时 emit("close-requested")。
+//
+// 设计意图：托盘图标在 Win10 上默认被收进任务栏的 ^ 折叠区，用户看不到就会
+// 以为程序已经退出。与其加一句小字提示，不如在关闭时给一次明确的二选一。
+async function initCloseHandling() {
+  const overlay = document.getElementById('close-overlay');
+  const noask = document.getElementById('close-noask');
+
+  try {
+    await window.__TAURI__.event.listen('close-requested', () => {
+      overlay.classList.remove('hidden');
+    });
+  } catch (e) {
+    console.error('监听关闭事件失败', e);
+  }
+
+  document.getElementById('close-min').addEventListener('click', async () => {
+    try {
+      if (noask.checked && currentConfig) {
+        const cfg = collectForm();
+        cfg.apps.confirm_close = false;
+        await invoke('save_config', { config: cfg });
+        currentConfig = cfg;
+        toast('以后关闭将直接最小化');
+      }
+      overlay.classList.add('hidden');
+      await invoke('hide_to_tray');
+    } catch (e) {
+      toast(`最小化失败：${e}`, 'err');
+    }
+  });
+
+  document.getElementById('close-quit').addEventListener('click', async () => {
+    try {
+      // 后端会先停掉 HUD/relay 再退出，避免 HUD 残留在屏幕上
+      await invoke('quit_app');
+    } catch (e) {
+      toast(`退出失败：${e}`, 'err');
+    }
+  });
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
   bind();
+  await initCloseHandling();
   await loadAll();
   setInterval(refreshStatus, 2000);
 });
