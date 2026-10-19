@@ -369,7 +369,7 @@ fn read_logs(config: AppConfig, max_lines: Option<usize>) -> Result<Vec<LogFileV
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     let mut out = Vec::new();
-    for role in ["hud", "relay"] {
+    for role in ["hud", "relay", "gui"] {
         let cfg = config.logging.for_component(role);
         let path = cfg.resolved_path_from(&base);
         let exists = path.is_file();
@@ -509,10 +509,34 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             }
         });
 
-    if let Some(icon) = app.default_window_icon() {
-        builder = builder.icon(icon.clone());
+    // 图标来源：优先用内嵌 PNG 显式加载，避免依赖 `default_window_icon()`。
+    //
+    // 之前只在 `default_window_icon()` 为 Some 时才设置图标；若它为 None，
+    // 托盘项就没有图像 —— 系统虽然登记了图标，但通知区里看不见。
+    match tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png")) {
+        Ok(img) => {
+            let (w, h) = (img.width(), img.height());
+            fh6_config::Logger::global().info(&format!("托盘图标：内嵌 PNG {w}x{h}"));
+            builder = builder.icon(img);
+        }
+        Err(e) => {
+            fh6_config::Logger::global().error(&format!("内嵌 PNG 解码失败：{e}"));
+            if let Some(icon) = app.default_window_icon() {
+                fh6_config::Logger::global().info("托盘图标：回退到默认窗口图标");
+                builder = builder.icon(icon.clone());
+            } else {
+                fh6_config::Logger::global().error("托盘图标：无可用图标（通知区可能看不到）");
+            }
+        }
     }
-    builder.build(app)?;
+    let tray = builder.build(app)?;
+    // 必须**保留**这个返回值。
+    //
+    // Tauri 的文档原话："This type is reference-counted and the icon is removed when
+    // the last instance is dropped." 也就是说 `builder.build(app)?;` 这种写法会让
+    // 返回值当场析构、图标刚创建就被移除 —— 托盘消息窗口还在，但通知区里什么都没有。
+    // 这正是「关闭窗口没有托盘图标」的真正原因。
+    app.manage(tray);
     Ok(())
 }
 
@@ -633,21 +657,34 @@ pub fn run() {
             read_logs
         ])
         .setup(|app| {
-            // 托盘是**可选能力**：某些环境（远程会话、精简系统、Explorer 未就绪）
-            // 会拒绝创建托盘图标。此时不应该让整个配置界面打不开 —— 打印告警后继续。
-            match build_tray(app.handle()) {
-                Ok(()) => {}
-                Err(e) => eprintln!("[warn] 托盘图标创建失败（界面仍可用）：{e}"),
-            }
-
-            // 首次读取配置：同步 close_to_tray，必要时自动启动子进程
+            // 先读配置并初始化日志：GUI 自己也需要留下记录。
+            //
+            // 无控制台的发布版里 `eprintln!` 等于把信息丢进虚空 —— 之前「托盘没图标」
+            // 就是因此查不到任何线索。日志文件是唯一可靠的排查入口。
             let state = app.state::<AppState>();
-            let path = state
+            let cfg_path = state
                 .config_path
                 .lock()
                 .map(|p| p.clone())
                 .unwrap_or_else(|_| default_config_path());
-            let (cfg, _note) = AppConfig::load(&path);
+            let (cfg, _note) = AppConfig::load(&cfg_path);
+            let log_cfg = cfg.init_logging("fh6-gui");
+            let log = fh6_config::Logger::global();
+            log.info(&format!("GUI 启动，配置文件 {}", cfg_path.display()));
+
+            // 托盘是**可选能力**：某些环境会拒绝创建。失败时记日志并继续，
+            // 不让整个配置界面打不开。
+            match build_tray(app.handle()) {
+                Ok(()) => log.info("托盘图标已创建"),
+                Err(e) => {
+                    log.error(&format!("托盘图标创建失败：{e}"));
+                    eprintln!("[warn] 托盘图标创建失败（界面仍可用）：{e}");
+                }
+            }
+            let _ = log_cfg;
+
+            // 同步运行期开关（配置已在上面读过）
+
             state
                 .close_to_tray
                 .store(cfg.apps.close_to_tray, Ordering::Relaxed);
@@ -677,10 +714,7 @@ pub fn run() {
                     // 前端弹层依赖 window.__TAURI__.event 的监听；实测它不可用时
                     // 用户点关闭会「毫无反应」（异常还被 try/catch 吞掉，界面上
                     // 没有任何迹象），比不拦更糟。关闭确认是关键交互，不能有静默失败。
-                    let hwnd = window
-                        .hwnd()
-                        .map(|h| h.0)
-                        .unwrap_or(std::ptr::null_mut());
+                    let hwnd = window.hwnd().map(|h| h.0).unwrap_or(std::ptr::null_mut());
                     match win_shell::confirm_close(hwnd) {
                         win_shell::CloseChoice::Minimize => {
                             let _ = window.hide();
