@@ -20,7 +20,7 @@
 //! 关闭窗口默认**收到托盘**而不是退出（`apps.close_to_tray`）：用户的预期是
 //! 「配置一次，后台常驻」，误点关闭不应该把 HUD 一起关掉。真正退出走托盘菜单。
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 
@@ -29,6 +29,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+
+#[cfg(windows)]
+mod single_instance;
 
 use fh6_config::AppConfig;
 use serde::Serialize;
@@ -290,7 +293,7 @@ fn start(state: State<'_, AppState>, config: AppConfig, which: String) -> Result
     }
     let mut msg = format!("已启动: {}", started.join(" + "));
     if !errors.is_empty() {
-        msg.push_str("；");
+        msg.push('；');
         msg.push_str(&errors.join("；"));
     }
     Ok(msg)
@@ -472,6 +475,15 @@ fn prepare_webview_data_dir() {
 
 /// 启动应用。
 pub fn run() {
+    // 单实例保护：若已有实例在运行，唤回它的窗口并直接返回。
+    //
+    // 这对「关闭窗口 = 收到托盘」的模式是必需的：用户看不到托盘图标时会以为
+    // 程序已退出，于是再双击一次；没有这层保护就会不断堆积实例。
+    #[cfg(windows)]
+    if !single_instance::acquire() {
+        return;
+    }
+
     prepare_webview_data_dir();
 
     tauri::Builder::default()

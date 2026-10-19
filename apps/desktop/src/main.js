@@ -208,13 +208,32 @@ async function loadAll() {
   }
 }
 
-async function save(showToast = true) {
+// 保存配置。
+//
+// `restart` 为真时：若已有进程在运行，保存后**自动重启**它们 —— 因为 HUD 与
+// relay 都只在启动时读一次配置，不重启的话改动永远不生效，用户会以为
+// 「界面上改了但没反应」。这正是最初的反馈。
+async function save(showToast = true, restart = true) {
   try {
     const cfg = collectForm();
     await invoke('save_config', { config: cfg });
     currentConfig = cfg;
+
+    let msg = '配置已保存';
+    if (restart) {
+      const st = await invoke('status', { config: cfg });
+      if (st.relay_running || st.hud_running) {
+        try {
+          await invoke('stop', { which: 'all' });
+          await invoke('start', { config: cfg, which: 'all' });
+          msg = '配置已保存，并已重启 HUD + relay';
+        } catch (e) {
+          msg = `配置已保存，但重启失败：${e}`;
+        }
+      }
+    }
     await refreshStatus();
-    if (showToast) toast('配置已保存');
+    if (showToast) toast(msg, msg.includes('失败') ? 'err' : 'ok');
   } catch (e) {
     toast(`保存失败：${e}`, 'err');
     throw e;
@@ -250,7 +269,7 @@ function bind() {
 
   document.getElementById('btn-start').addEventListener('click', async () => {
     try {
-      await save(false); // 先落盘，子进程读的是文件
+      await save(false, false); // 先落盘，子进程读的是文件；此处不自动重启
       const msg = await invoke('start', { config: collectForm(), which: 'all' });
       toast(msg);
       await refreshStatus();
@@ -260,6 +279,18 @@ function bind() {
     }
   });
 
+  document.getElementById('btn-restart').addEventListener('click', async () => {
+    try {
+      await save(false, false); // 先确保磁盘上是最新配置
+      await invoke('stop', { which: 'all' });
+      const msg = await invoke('start', { config: collectForm(), which: 'all' });
+      toast(msg);
+      await refreshStatus();
+    } catch (e) {
+      toast(`重启失败：${e}`, 'err');
+      await refreshStatus();
+    }
+  });
   document.getElementById('btn-stop').addEventListener('click', async () => {
     try {
       const msg = await invoke('stop', { which: 'all' });

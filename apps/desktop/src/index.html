@@ -42,10 +42,16 @@
           <code id="hud-exe" class="path">—</code>
         </div>
       </div>
+      <p class="hint tip">
+        关闭窗口只会<strong>最小化到托盘</strong>（不会退出程序）。图标可能在任务栏右下角的
+        <code>^</code> 折叠区里；右键图标可「显示窗口 / 启动 / 停止 / 退出」。
+        若不想常驻，可在下方「应用与启动」里取消「关闭窗口时收到托盘」。
+      </p>
       <div class="actions">
         <button class="btn primary" id="btn-start">启动 HUD + relay</button>
         <button class="btn danger" id="btn-stop">停止全部</button>
-        <button class="btn" id="btn-save">保存配置</button>
+        <button class="btn" id="btn-save">保存并应用</button>
+        <button class="btn" id="btn-restart">重启以应用</button>
         <button class="btn" id="btn-reload">重载</button>
         <button class="btn" id="btn-log">打开日志目录</button>
       </div>

@@ -227,3 +227,20 @@ table input[type="text"], table input[type="number"] { padding: 5px 8px; }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .toast.ok { border-color: rgba(61,220,132,.5); }
 .toast.err { border-color: rgba(255,77,106,.5); color: #ffd0d8; }
+
+/* 运行状态里的提示条 */
+.tip {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  background: rgba(82, 255, 235, .07);
+  border: 1px solid rgba(82, 255, 235, .22);
+  border-radius: 7px;
+  line-height: 1.65;
+}
+.tip strong { color: var(--mint); }
+.tip code {
+  padding: 1px 5px;
+  background: var(--bg-soft);
+  border-radius: 4px;
+  color: var(--amber);
+}
