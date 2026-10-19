@@ -280,14 +280,23 @@ fn split_host_port(s: &str) -> Option<(String, u16)> {
 /// 配置文件里的 `relay` 部分本进程不直接用（那是 `fh6-relay` 的），
 /// 但保留在 `AppConfig` 里整体读写，避免 HUD 的保存动作把 relay 配置抹掉。
 fn load_app_config(cfg: &Config) -> AppConfig {
+    // 配置来源优先级：--config 显式指定 > exe 同目录的默认文件 > 内置默认值。
+    //
+    // 自动发现默认文件很重要：用户从 GUI 存好配置后，若直接双击 fh6-hud.exe，
+    // 程序必须读到同一份配置 —— 否则会出现「界面上改了，直接运行却不生效」
+    // 这种最难排查的错觉。
+    let auto_path = AppConfig::default_path();
     let (mut app, note) = match &cfg.config_file {
         Some(path) => AppConfig::load(std::path::Path::new(path)),
+        None if auto_path.exists() => AppConfig::load(&auto_path),
         None => (AppConfig::default(), None),
     };
     if let Some(n) = note {
         println!("配置: {n}");
     } else if let Some(p) = &cfg.config_file {
         println!("配置: 已加载 {p}");
+    } else if auto_path.exists() {
+        println!("配置: 已自动加载 {}", auto_path.display());
     }
     // 命令行覆盖监听端点
     if let Some(l) = &cfg.listen {

@@ -187,14 +187,20 @@ fn resolve_addr(s: &str) -> Result<SocketAddr, String> {
 /// 内置默认值 → 配置文件中的 `relay` 段 → 命令行参数。
 fn run(cli: CliConfig) -> Result<(), Box<dyn std::error::Error>> {
     // ---- 1. 读配置文件 ----
+    // 配置来源优先级：--config 显式指定 > exe 同目录的默认文件 > 内置默认值。
+    // 自动发现让「GUI 里存好的配置」对直接启动的 relay 同样生效。
+    let auto_path = AppConfig::default_path();
     let (mut app, note) = match &cli.config_file {
         Some(p) => AppConfig::load(std::path::Path::new(p)),
+        None if auto_path.exists() => AppConfig::load(&auto_path),
         None => (AppConfig::default(), None),
     };
     if let Some(n) = note {
         eprintln!("配置: {n}");
     } else if let Some(p) = &cli.config_file {
         println!("配置: 已加载 {p}");
+    } else if auto_path.exists() {
+        println!("配置: 已自动加载 {}", auto_path.display());
     }
 
     // ---- 2. 命令行覆盖 ----
