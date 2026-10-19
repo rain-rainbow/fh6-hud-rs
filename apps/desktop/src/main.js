@@ -438,51 +438,8 @@ function bind() {
   });
 }
 
-// 关闭确认层：由 Rust 侧在收到 CloseRequested 时 emit("close-requested")。
-//
-// 设计意图：托盘图标在 Win10 上默认被收进任务栏的 ^ 折叠区，用户看不到就会
-// 以为程序已经退出。与其加一句小字提示，不如在关闭时给一次明确的二选一。
-async function initCloseHandling() {
-  const overlay = document.getElementById('close-overlay');
-  const noask = document.getElementById('close-noask');
-
-  try {
-    await window.__TAURI__.event.listen('close-requested', () => {
-      overlay.classList.remove('hidden');
-    });
-  } catch (e) {
-    console.error('监听关闭事件失败', e);
-  }
-
-  document.getElementById('close-min').addEventListener('click', async () => {
-    try {
-      if (noask.checked && currentConfig) {
-        const cfg = collectForm();
-        cfg.apps.confirm_close = false;
-        await invoke('save_config', { config: cfg });
-        currentConfig = cfg;
-        toast('以后关闭将直接最小化');
-      }
-      overlay.classList.add('hidden');
-      await invoke('hide_to_tray');
-    } catch (e) {
-      toast(`最小化失败：${e}`, 'err');
-    }
-  });
-
-  document.getElementById('close-quit').addEventListener('click', async () => {
-    try {
-      // 后端会先停掉 HUD/relay 再退出，避免 HUD 残留在屏幕上
-      await invoke('quit_app');
-    } catch (e) {
-      toast(`退出失败：${e}`, 'err');
-    }
-  });
-}
-
 window.addEventListener('DOMContentLoaded', async () => {
   bind();
-  await initCloseHandling();
   await loadAll();
   setInterval(refreshStatus, 2000);
 });

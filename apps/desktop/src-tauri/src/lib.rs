@@ -39,7 +39,7 @@ use fh6_config::AppConfig;
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Manager, State, WindowEvent};
 
 /// 配置文件默认文件名（与 `fh6_config::app::DEFAULT_FILE_NAME` 一致）。
 const CONFIG_NAME: &str = "fh6-hud.config.json";
@@ -340,23 +340,6 @@ fn stop(state: State<'_, AppState>, which: String) -> Result<String, String> {
     }
 }
 
-/// 隐藏主窗口（收到托盘）。
-///
-/// 由前端的「关闭确认层」调用，而不是在窗口事件里直接隐藏 ——
-/// 这样用户能先看到「程序会继续在后台运行」这件事。
-#[tauri::command]
-fn hide_to_tray(window: tauri::Window) -> Result<(), String> {
-    window.hide().map_err(|e| format!("隐藏窗口失败: {e}"))
-}
-
-/// 真正退出：先停掉所有子进程，避免 HUD 残留在屏幕上。
-#[tauri::command]
-fn quit_app(app: AppHandle) -> Result<(), String> {
-    stop_all(&app);
-    app.exit(0);
-    Ok(())
-}
-
 /// 一份日志文件的读取结果（供界面内查看）。
 #[derive(Debug, Clone, Serialize)]
 pub struct LogFileView {
@@ -646,8 +629,6 @@ pub fn run() {
             status,
             start,
             stop,
-            hide_to_tray,
-            quit_app,
             open_log_dir,
             read_logs
         ])
@@ -689,17 +670,27 @@ pub fn run() {
                     stop_all(app);
                     return;
                 }
-                // 一律先拦下关闭：真正的隐藏由前端确认层调用 hide_to_tray。
-                //
-                // 之所以不在这里直接 hide：用户看不到托盘图标（Win10 把它收进
-                // 任务栏的 ^ 折叠区）时会以为程序已经退出，这正是最初反馈的问题。
-                // 让前端弹一次明确的二选一，比任何暗示都直接。
                 api.prevent_close();
                 if confirm {
-                    // 保持窗口可见，由前端显示确认层
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                    let _ = app.emit("close-requested", ());
+                    // 用**系统原生确认框**，而不是前端弹层。
+                    //
+                    // 前端弹层依赖 window.__TAURI__.event 的监听；实测它不可用时
+                    // 用户点关闭会「毫无反应」（异常还被 try/catch 吞掉，界面上
+                    // 没有任何迹象），比不拦更糟。关闭确认是关键交互，不能有静默失败。
+                    let hwnd = window
+                        .hwnd()
+                        .map(|h| h.0)
+                        .unwrap_or(std::ptr::null_mut());
+                    match win_shell::confirm_close(hwnd) {
+                        win_shell::CloseChoice::Minimize => {
+                            let _ = window.hide();
+                        }
+                        win_shell::CloseChoice::Quit => {
+                            stop_all(app);
+                            app.exit(0);
+                        }
+                        win_shell::CloseChoice::Cancel => {}
+                    }
                 } else {
                     let _ = window.hide();
                 }

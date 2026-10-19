@@ -100,3 +100,70 @@ pub fn open(path: &Path) -> Result<(), String> {
         other => format!("打开失败，Windows 错误码 {other}"),
     })
 }
+// ---------------------------------------------------------------- 系统确认框
+
+/// `MessageBoxW` 的按钮组合与返回值。
+pub mod mb {
+    /// 是 / 否 / 取消
+    pub const YESNOCANCEL: u32 = 0x0000_0003;
+    /// 信息图标
+    pub const ICONINFORMATION: u32 = 0x0000_0040;
+    /// 返回值：是
+    pub const IDYES: i32 = 6;
+    /// 返回值：否
+    pub const IDNO: i32 = 7;
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn MessageBoxW(hwnd: Handle, text: *const u16, caption: *const u16, flags: u32) -> i32;
+}
+
+/// 用户对「关闭窗口」的选择。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseChoice {
+    /// 最小化到托盘
+    Minimize,
+    /// 退出程序
+    Quit,
+    /// 什么都不做（继续使用）
+    Cancel,
+}
+
+/// 弹出系统原生确认框，询问关闭时要最小化还是退出。
+///
+/// # 为什么不用前端弹层
+///
+/// 最初的实现是 Rust 拦下关闭后 emit 一个事件、由前端显示自定义弹层。
+/// 实测用户点击关闭**毫无反应** —— 因为前端那层依赖 `window.__TAURI__.event`
+/// 的监听，一旦它不可用（异常还被 try/catch 吞掉，界面上没有任何迹象），
+/// 窗口就变成了「点了没反应」，比不拦还糟。
+///
+/// 关闭确认属于**关键交互**，不能有任何静默失败的可能。系统 MessageBox 是
+/// 同步阻塞调用，返回值即用户的选择，不存在"没响应"这种状态。
+pub fn confirm_close(hwnd: Handle) -> CloseChoice {
+    let text = wide(
+        "关闭窗口不会退出程序。\n\n\
+         【是】最小化到托盘 —— HUD 与 relay 继续在后台运行\n\
+         【否】退出程序 —— 会先停止 HUD 与 relay\n\
+         【取消】不做任何事\n\n\
+         托盘图标可能在任务栏右下角的 ^ 折叠区里。",
+    );
+    let caption = wide("FH6 HUD 配置");
+    // SAFETY: 两个指针都指向本函数内有效且以 NUL 结尾的 UTF-16 缓冲；
+    // hwnd 由调用方传入（可能为空，MessageBox 会以无父窗口方式显示）。
+    let ret = unsafe {
+        MessageBoxW(
+            hwnd,
+            text.as_ptr(),
+            caption.as_ptr(),
+            mb::YESNOCANCEL | mb::ICONINFORMATION,
+        )
+    };
+    match ret {
+        mb::IDYES => CloseChoice::Minimize,
+        mb::IDNO => CloseChoice::Quit,
+        // 其余返回值（含「取消」与直接点右上角关闭）都视为不关闭
+        _ => CloseChoice::Cancel,
+    }
+}
