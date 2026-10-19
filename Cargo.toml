@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/fh6-config",
     "crates/fh6-core",
     "crates/fh6-relay",
     "crates/fh6-hud",
@@ -16,6 +17,7 @@ authors = ["rain-rainbow"]
 
 [workspace.dependencies]
 fh6-core = { path = "crates/fh6-core" }
+fh6-config = { path = "crates/fh6-config" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

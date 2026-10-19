@@ -1,0 +1,15 @@
+{
+  "name": "fh6-hud-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "FH6 HUD 图形化配置界面（Tauri 2）",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "bundle": "tauri build --bundles nsis"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

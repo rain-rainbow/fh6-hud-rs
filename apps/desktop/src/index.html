@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FH6 HUD 配置</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>FH6 HUD 配置</h1>
+      <span class="ver">v0.1.0</span>
+    </div>
+    <div class="proc-status">
+      <span class="pill" id="pill-relay" title="遥测分发器">relay<span class="state">未知</span></span>
+      <span class="pill" id="pill-hud" title="HUD 叠加层">HUD<span class="state">未知</span></span>
+    </div>
+  </header>
+
+  <main>
+    <!-- 运行状态 -->
+    <section class="card">
+      <h2>运行状态</h2>
+      <div class="row">
+        <div class="grow">
+          <label>配置文件</label>
+          <div class="pathline">
+            <code id="cfg-path">—</code>
+            <button class="btn tiny" id="btn-cfg-default">恢复默认位置</button>
+          </div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="grow">
+          <label>relay 可执行文件</label>
+          <code id="relay-exe" class="path">—</code>
+        </div>
+        <div class="grow">
+          <label>HUD 可执行文件</label>
+          <code id="hud-exe" class="path">—</code>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn primary" id="btn-start">启动 HUD + relay</button>
+        <button class="btn danger" id="btn-stop">停止全部</button>
+        <button class="btn" id="btn-save">保存配置</button>
+        <button class="btn" id="btn-reload">重载</button>
+        <button class="btn" id="btn-log">打开日志目录</button>
+      </div>
+    </section>
+
+    <!-- 外观 -->
+    <section class="card">
+      <h2>外观</h2>
+      <div class="grid">
+        <div class="field">
+          <label for="lang">界面语言</label>
+          <select id="lang" data-path="hud.language">
+            <option value="zh">中文（推荐）</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="theme">主题名称</label>
+          <input id="theme" type="text" data-path="hud.theme_name" />
+        </div>
+        <div class="field">
+          <label for="scale">全局缩放 <output id="scale-out"></output></label>
+          <input id="scale" type="range" min="0.25" max="4" step="0.05" data-path="hud.global_scale" />
+        </div>
+        <div class="field">
+          <label for="offx">水平偏移 <output id="offx-out"></output></label>
+          <input id="offx" type="range" min="-1000" max="1000" step="5" data-path="hud.offset_x" />
+        </div>
+        <div class="field">
+          <label for="offy">垂直偏移 <output id="offy-out"></output></label>
+          <input id="offy" type="range" min="-1000" max="1000" step="5" data-path="hud.offset_y" />
+        </div>
+        <div class="field">
+          <label for="angle-cx">主仪表中心 X</label>
+          <input id="angle-cx" type="number" step="10" data-path="hud.angle.cx" />
+        </div>
+        <div class="field">
+          <label for="angle-cy">主仪表中心 Y</label>
+          <input id="angle-cy" type="number" step="10" data-path="hud.angle.cy" />
+        </div>
+        <div class="field">
+          <label for="angle-r">主仪表半径</label>
+          <input id="angle-r" type="number" step="10" data-path="hud.angle.radius" />
+        </div>
+      </div>
+    </section>
+
+    <!-- 透明度 -->
+    <section class="card">
+      <h2>背景透明度 <span class="hint">数值越小越透明；0 = 完全透明，只留线条与文字</span></h2>
+      <div class="grid">
+        <div class="field">
+          <label for="op-input">输入面板底衬 <output id="op-input-out"></output></label>
+          <input id="op-input" type="range" min="0" max="1" step="0.01" data-path="hud.input_panel.panel_opacity" />
+        </div>
+        <div class="field">
+          <label for="op-slip">漂移面板底衬 <output id="op-slip-out"></output></label>
+          <input id="op-slip" type="range" min="0" max="1" step="0.01" data-path="hud.slip_panel.panel_opacity" />
+        </div>
+        <div class="field">
+          <label for="op-flow">状态面板底衬 <output id="op-flow-out"></output></label>
+          <input id="op-flow" type="range" min="0" max="1" step="0.01" data-path="hud.flow_panel.panel_opacity" />
+        </div>
+        <div class="field">
+          <label for="op-g">G 表底衬 <output id="op-g-out"></output></label>
+          <input id="op-g" type="range" min="0" max="1" step="0.01" data-path="hud.g_meter.backdrop_alpha" />
+        </div>
+        <div class="field">
+          <label for="op-pop">弹窗底衬 <output id="op-pop-out"></output></label>
+          <input id="op-pop" type="range" min="0" max="1" step="0.01" data-path="hud.popup.backdrop_alpha" />
+        </div>
+        <div class="field">
+          <label for="scan">扫描线强度 <output id="scan-out"></output></label>
+          <input id="scan" type="range" min="0" max="1" step="0.01" data-path="hud.input_panel.scanline_alpha" />
+        </div>
+      </div>
+    </section>
+
+    <!-- 网络 -->
+    <section class="card">
+      <h2>网络端点</h2>
+      <p class="hint">
+        游戏内「数据输出IP端口」应填 <b>relay 监听端口</b>（默认 5301），
+        而不是 5300 —— 5300 被飞智自适应扳机独占。
+      </p>
+      <div class="grid">
+        <div class="field">
+          <label for="hud-ip">HUD 监听地址</label>
+          <input id="hud-ip" type="text" data-path="hud.network.listen_ip" />
+        </div>
+        <div class="field">
+          <label for="hud-port">HUD 监听端口</label>
+          <input id="hud-port" type="number" min="1" max="65535" data-path="hud.network.listen_port" />
+        </div>
+        <div class="field">
+          <label for="relay-ip">relay 监听地址</label>
+          <input id="relay-ip" type="text" data-path="relay.listen_ip" />
+        </div>
+        <div class="field">
+          <label for="relay-port">relay 监听端口</label>
+          <input id="relay-port" type="number" min="1" max="65535" data-path="relay.listen_port" />
+        </div>
+        <div class="field check">
+          <label for="relay-verbose">relay 详细日志（每个包都记录）</label>
+          <input id="relay-verbose" type="checkbox" data-path="relay.verbose" />
+        </div>
+      </div>
+    </section>
+
+    <!-- 分发目标 -->
+    <section class="card">
+      <h2>分发目标 <span class="hint">relay 收到一个包后，原样转发给下列所有启用的目标</span></h2>
+      <div class="table-wrap">
+        <table id="targets">
+          <thead>
+            <tr>
+              <th style="width:56px">启用</th>
+              <th>名称</th>
+              <th>地址</th>
+              <th style="width:110px">端口</th>
+              <th style="width:56px"></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="actions">
+        <button class="btn tiny" id="btn-add-target">+ 添加目标</button>
+        <span class="hint" id="target-count"></span>
+      </div>
+    </section>
+
+    <!-- 日志 -->
+    <section class="card">
+      <h2>日志文件 <span class="hint">可选；关闭时完全不写磁盘</span></h2>
+      <div class="grid">
+        <div class="field check">
+          <label for="log-enabled">启用日志文件</label>
+          <input id="log-enabled" type="checkbox" data-path="logging.enabled" />
+        </div>
+        <div class="field">
+          <label for="log-level">级别</label>
+          <select id="log-level" data-path="logging.level">
+            <option value="error">仅错误</option>
+            <option value="warn">错误 + 警告</option>
+            <option value="info">常规（推荐）</option>
+            <option value="debug">全部（含每个包）</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="log-path">文件路径</label>
+          <input id="log-path" type="text" data-path="logging.path" />
+        </div>
+        <div class="field">
+          <label for="log-size">单文件上限（KB）</label>
+          <input id="log-size" type="number" min="4" max="1048576" step="256" data-path="logging.max_bytes" />
+        </div>
+        <div class="field">
+          <label for="log-keep">保留历史份数</label>
+          <input id="log-keep" type="number" min="0" max="50" data-path="logging.keep_files" />
+        </div>
+        <div class="field check">
+          <label for="log-console">同时输出到控制台</label>
+          <input id="log-console" type="checkbox" data-path="logging.console" />
+        </div>
+      </div>
+    </section>
+
+    <!-- 应用 -->
+    <section class="card">
+      <h2>应用与启动</h2>
+      <div class="grid">
+        <div class="field">
+          <label for="hud-exe-input">HUD 可执行文件（留空自动查找）</label>
+          <input id="hud-exe-input" type="text" data-path="apps.hud_exe" placeholder="自动查找" />
+        </div>
+        <div class="field">
+          <label for="relay-exe-input">relay 可执行文件（留空自动查找）</label>
+          <input id="relay-exe-input" type="text" data-path="apps.relay_exe" placeholder="自动查找" />
+        </div>
+        <div class="field check">
+          <label for="auto-start">启动本界面时自动拉起两个进程</label>
+          <input id="auto-start" type="checkbox" data-path="apps.auto_start" />
+        </div>
+        <div class="field check">
+          <label for="close-tray">关闭窗口时收到托盘（否则直接退出）</label>
+          <input id="close-tray" type="checkbox" data-path="apps.close_to_tray" />
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+[package]
+name = "fh6-hud-desktop"
+description = "FH6 HUD 图形化配置界面（Tauri 2，常驻托盘）"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+
+# 独立 workspace：Tauri 的依赖树很大（数百个 crate），
+# 放进主 workspace 会让 `cargo test --workspace` 从 1 秒变成几分钟。
+# 两个 workspace 通过路径依赖共享 fh6-config，配置格式天然一致。
+[workspace]
+
+[lib]
+name = "fh6_hud_desktop_lib"
+# 只产出 rlib。
+#
+# Tauri 官方模板写的是 ["staticlib", "cdylib", "rlib"] —— 但那两个是为了
+# **移动端**（iOS/Android 需要一个 C ABI 动态库）。桌面端不需要，而且在
+# Windows + GNU 工具链下 `cdylib` 会把所有符号导出到 `list.def`，
+# 链接时报 `error: export ordinal too large: 94449`（PE 导出序号上限 65535）。
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+fh6-config = { path = "../../../crates/fh6-config" }

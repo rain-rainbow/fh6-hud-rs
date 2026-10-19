@@ -24,8 +24,8 @@
 
 use crate::gauge::{self, ArcSpec, Bgra, Rect, Theme};
 use crate::raster::{Rasterizer, TextAlign};
-use crate::settings::Settings;
 use crate::shared::LinkState;
+use fh6_config::settings::Settings;
 
 use fh6_core::drift::{DriftSnapshot, Popup};
 
@@ -45,6 +45,8 @@ pub struct HudPainter<'a> {
     #[allow(dead_code)]
     settings: &'a Settings,
     theme: Theme,
+    /// 本地化文本（由 settings.language 决定）。
+    labels: crate::i18n::Labels,
 }
 
 impl<'a> HudPainter<'a> {
@@ -58,6 +60,7 @@ impl<'a> HudPainter<'a> {
             raster: Rasterizer::new(canvas),
             settings,
             theme,
+            labels: crate::i18n::Labels::new(settings.language),
         }
     }
 
@@ -319,7 +322,7 @@ impl<'a> HudPainter<'a> {
             TextAlign::Center,
         );
         self.text(
-            "km/h",
+            self.labels.ui(crate::i18n::UiText::SpeedUnit),
             cx,
             cy + big * 1.22,
             big * 0.30,
@@ -356,7 +359,7 @@ impl<'a> HudPainter<'a> {
                 LinkState::Live => self.theme.state_good,
             };
             self.text(
-                link.label(),
+                self.labels.link(link),
                 cx,
                 cy + radius * 0.66,
                 (p.radius * 0.14).max(11.0) * self.settings.global_scale,
@@ -375,16 +378,19 @@ impl<'a> HudPainter<'a> {
         let radius = p.radius * self.settings.global_scale;
         let (inner, outer) = gauge::g_ring_radii(radius);
 
-        // 圆环底色：低透明度炭黑，让 G 表在复杂背景上依然可读。
+        // 圆环底色：透明度由配置决定（默认 0.12，偏透明）。
         // 用 ring 原语而不是多边形逼近 —— 它带边缘抗锯齿，圆边不会有锯齿。
         let _ = inner;
-        self.stroke_ring(
-            cx,
-            cy,
-            (outer + inner) * 0.5,
-            outer - inner,
-            self.theme.charcoal.with_alpha(150),
-        );
+        let ring_alpha = (255.0 * p.backdrop_alpha.clamp(0.0, 1.0)) as u8;
+        if ring_alpha > 0 {
+            self.stroke_ring(
+                cx,
+                cy,
+                (outer + inner) * 0.5,
+                outer - inner,
+                self.theme.charcoal.with_alpha(ring_alpha),
+            );
+        }
         // 外圈描边，加强轮廓
         self.stroke_ring(cx, cy, outer, 1.5, with_alpha(self.theme.text_dim, 0.5));
         let segments = 72usize;
@@ -445,7 +451,7 @@ impl<'a> HudPainter<'a> {
         // 标题与数值
         let title_size = (p.radius * 0.13).max(9.0);
         self.text(
-            "G",
+            self.labels.ui(crate::i18n::UiText::Gmeter),
             cx - outer,
             cy - outer - title_size * 1.4,
             title_size,
@@ -468,7 +474,7 @@ impl<'a> HudPainter<'a> {
     /// 用给定颜色填充多边形（GDI 的 `Polygon`）。
     pub fn bar_panel(
         &mut self,
-        p: &crate::settings::BarPanelParams,
+        p: &fh6_config::settings::BarPanelParams,
         title: &str,
         bars: &[BarItem],
     ) {
@@ -481,8 +487,9 @@ impl<'a> HudPainter<'a> {
         // 注意：字形实际高度约为名义字号的 1.3 倍（含内部行距），
         // 所以行高必须在 label_sz 之外再留出这段空间，否则标签会压到条形上。
         let label_sz = (title_sz * 0.72).max(6.0);
-        let glyph_h = label_sz * 1.35;
-        let row_h = glyph_h + bar_th + 6.0;
+        // 中文字形比拉丁大写字母高，行高需要同步放大，否则标签会压到条形上。
+        let glyph_h = label_sz * 1.35 * self.labels.glyph_factor();
+        let row_h = glyph_h + bar_th + 4.0 * self.labels.line_factor();
         let needed = title_sz * 1.5 + row_h * bars.len() as f32 + 10.0;
         let hgt = (p.h * self.settings.global_scale).max(needed);
         let panel = Rect::new(x, y, wdt, hgt);
@@ -591,39 +598,39 @@ impl<'a> HudPainter<'a> {
     pub fn input_panel(&mut self, frame: &HudFrame) {
         let d = &frame.core.derived;
         let dir = if d.steer_pct < -0.5 {
-            "L"
+            self.labels.ui(crate::i18n::UiText::SteerLeft)
         } else if d.steer_pct > 0.5 {
-            "R"
+            self.labels.ui(crate::i18n::UiText::SteerRight)
         } else {
             "-"
         };
         let bars = [
             BarItem {
-                label: "THROTTLE".to_string(),
+                label: self.labels.ui(crate::i18n::UiText::Throttle).to_string(),
                 fraction: d.throttle_pct / 100.0,
                 color: self.theme.state_good,
                 value: format!("{:.0}%", d.throttle_pct),
             },
             BarItem {
-                label: "BRAKE".to_string(),
+                label: self.labels.ui(crate::i18n::UiText::Brake).to_string(),
                 fraction: d.brake_pct / 100.0,
                 color: self.theme.state_danger,
                 value: format!("{:.0}%", d.brake_pct),
             },
             BarItem {
-                label: "CLUTCH".to_string(),
+                label: self.labels.ui(crate::i18n::UiText::Clutch).to_string(),
                 fraction: d.clutch_pct / 100.0,
                 color: self.theme.accent_amber,
                 value: format!("{:.0}%", d.clutch_pct),
             },
             BarItem {
-                label: "HANDBRAKE".to_string(),
+                label: self.labels.ui(crate::i18n::UiText::Handbrake).to_string(),
                 fraction: d.handbrake_pct / 100.0,
                 color: self.theme.angle_right_rose,
                 value: format!("{:.0}%", d.handbrake_pct),
             },
             BarItem {
-                label: format!("STEER ({dir})"),
+                label: format!("{} ({dir})", self.labels.ui(crate::i18n::UiText::Steer)),
                 // 方向盘是 -100..100，条形显示幅值，方向看上面的 L/R
                 fraction: (d.steer_pct.abs() / 100.0).min(1.0),
                 color: self.theme.angle_left_ice,
@@ -631,7 +638,8 @@ impl<'a> HudPainter<'a> {
             },
         ];
         let p = self.settings.input_panel;
-        self.bar_panel(&p, "INPUT", &bars);
+        let title = self.labels.ui(crate::i18n::UiText::InputPanel);
+        self.bar_panel(&p, title, &bars);
     }
 
     /// 画后轴滑移面板（漂移强度最直观的指标）。
@@ -640,38 +648,39 @@ impl<'a> HudPainter<'a> {
         let d = &frame.core.derived;
         let bars = [
             BarItem {
-                label: "REAR RL".to_string(),
+                label: self.labels.ui(crate::i18n::UiText::RearLeft).to_string(),
                 fraction: gauge::slip_fraction(t.wheel_rl.combined_slip),
                 color: self.slip_color(t.wheel_rl.combined_slip),
                 value: format!("{:.2}", t.wheel_rl.combined_slip),
             },
             BarItem {
-                label: "REAR RR".to_string(),
+                label: self.labels.ui(crate::i18n::UiText::RearRight).to_string(),
                 fraction: gauge::slip_fraction(t.wheel_rr.combined_slip),
                 color: self.slip_color(t.wheel_rr.combined_slip),
                 value: format!("{:.2}", t.wheel_rr.combined_slip),
             },
             BarItem {
-                label: "REAR AVG".to_string(),
+                label: self.labels.ui(crate::i18n::UiText::RearAvg).to_string(),
                 fraction: gauge::slip_fraction(d.rear_slip),
                 color: self.slip_color(d.rear_slip),
                 value: format!("{:.2}", d.rear_slip),
             },
             BarItem {
-                label: "RPM".to_string(),
+                label: self.labels.ui(crate::i18n::UiText::Rpm).to_string(),
                 fraction: d.rpm_ratio,
                 color: self.theme.accent_mint,
                 value: format!("{:.0}", t.current_engine_rpm),
             },
             BarItem {
-                label: "COUNTER".to_string(),
+                label: self.labels.ui(crate::i18n::UiText::Counter).to_string(),
                 fraction: frame.drift.counter_pct / 100.0,
                 color: self.theme.accent_amber,
                 value: format!("{:.0}", frame.drift.counter_pct),
             },
         ];
         let p = self.settings.slip_panel;
-        self.bar_panel(&p, "DRIFT", &bars);
+        let title = self.labels.ui(crate::i18n::UiText::DriftPanel);
+        self.bar_panel(&p, title, &bars);
     }
 
     /// 滑移量对应的颜色：越大越危险。
@@ -713,12 +722,17 @@ impl<'a> HudPainter<'a> {
         // 半透明底衬：弹窗颜色多为亮色，直接叠在仪表弧线上会看不清。
         // 用估计宽度而不是真实文本度量 —— 底衬宁可略宽一点，
         // 也不要在渲染前先做一次字形光栅化（那会多一次 GDI 往返）。
-        let est_w = (popup.label().chars().count() as f32) * size * 0.62 + size;
+        let title = self.labels.popup(popup);
+        let est_w = (title.chars().count() as f32) * size * 0.72 + size;
         let est_h = size * 1.45;
-        self.raster.fill_rect(
-            Rect::new(cx - est_w * 0.5, cy - size * 0.28, est_w, est_h),
-            self.theme.charcoal.with_alpha(150),
-        );
+        // 底衬透明度由配置决定：默认 0.22，调成 0 就完全不画底衬。
+        let backdrop = (255.0 * self.settings.popup.backdrop_alpha.clamp(0.0, 1.0)) as u8;
+        if backdrop > 0 {
+            self.raster.fill_rect(
+                Rect::new(cx - est_w * 0.5, cy - size * 0.28, est_w, est_h),
+                self.theme.charcoal.with_alpha(backdrop),
+            );
+        }
 
         // 淡出：剩余时间小于 0.25 秒时按比例降低不透明度
         let fade = (snap.popup.ttl / 0.25).clamp(0.0, 1.0);
@@ -726,7 +740,7 @@ impl<'a> HudPainter<'a> {
         let outline = with_alpha(self.theme.charcoal, fade * 0.95);
 
         self.text_outlined(
-            popup.label(),
+            title,
             cx,
             cy,
             size,
@@ -759,7 +773,8 @@ impl<'a> HudPainter<'a> {
         let (x, y) = self.global(p.x, p.y);
         let wdt = p.w * self.settings.global_scale;
         let lines = 6;
-        let lh = 15.0 * self.settings.global_scale;
+        // 行距必须容纳中文字形（汉字占满字身框，比拉丁大写字母高约 28%）
+        let lh = 15.0 * self.settings.global_scale * self.labels.line_factor();
         let hgt = lines as f32 * lh + 14.0;
         let panel = Rect::new(x, y, wdt, hgt);
 
@@ -794,38 +809,42 @@ impl<'a> HudPainter<'a> {
 
         line(
             self,
-            "FLOW",
+            self.labels.ui(crate::i18n::UiText::FlowRow),
             &format!("{:.0}", snap.flow_pct),
             self.theme.flow_color(snap.flow_quality),
         );
         line(
             self,
-            "QUALITY",
-            snap.flow_quality.label(),
+            self.labels.ui(crate::i18n::UiText::Quality),
+            self.labels.flow_quality(snap.flow_quality),
             self.theme.flow_color(snap.flow_quality),
         );
         line(
             self,
-            "RISK",
+            self.labels.ui(crate::i18n::UiText::Risk),
             &format!("{:.0}", snap.spin_risk),
             self.theme.risk_color(snap.risk_label),
         );
         line(
             self,
-            "LEVEL",
-            snap.risk_label.label(),
+            self.labels.ui(crate::i18n::UiText::Level),
+            self.labels.risk(snap.risk_label),
             self.theme.risk_color(snap.risk_label),
         );
         line(
             self,
-            "STYLE",
-            snap.style.label(),
+            self.labels.ui(crate::i18n::UiText::Style),
+            self.labels.style(snap.style),
             self.theme.style_color(snap.style),
         );
         line(
             self,
-            "STATE",
-            &format!("{} {}", snap.drift_state.label(), snap.holding_drift as u8),
+            self.labels.ui(crate::i18n::UiText::State),
+            &format!(
+                "{} {}",
+                self.labels.drift_state(snap.drift_state),
+                snap.holding_drift as u8
+            ),
             self.theme.text_white,
         );
 

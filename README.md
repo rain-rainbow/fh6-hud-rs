@@ -16,6 +16,7 @@
 - [它解决什么问题](#它解决什么问题)
 - [架构](#架构)
 - [快速开始](#快速开始)
+- [配置](#配置)
 - [工程结构](#工程结构)
 - [测试](#测试)
 - [参考来源与许可声明](#参考来源与许可声明)
@@ -32,15 +33,16 @@
 |---|---|---|
 | `fh6-core` — 数据包解析 | ✅ 完成 | 324 字节包、88 字段、精确偏移表、派生量计算 |
 | `fh6-core` — 漂移状态机 | ✅ 完成 | FLOW / SPIN RISK / 反打 / 风格 / 事件弹窗，纯逻辑零分配 |
-| `fh6-relay` — UDP 分发器 | ✅ 完成 | 让 HUD 与飞智自适应扳机同时工作 |
+| `fh6-config` — 配置模型 | ✅ 完成 | 外观 / 网络端点 / 分发目标 / 日志，三者共享同一份配置 |
+| `fh6-relay` — UDP 分发器 | ✅ 完成 | 让 HUD 与飞智自适应扳机同时工作；目标可任意增删 |
 | `fh6-hud` — 窗口与光栅化 | ✅ 完成 | 分层透明窗口 + 自实现软件光栅化（见 ADR-011） |
 | `fh6-hud` — 仪表绘制 | ✅ 完成 | 主角度表 / G 表 / 输入 / 滑移 / 状态面板 / 事件弹窗 |
-| `fh6-hud` — 实时调参 UI | 🚧 未实现 | 参数模型已就绪，交互式编辑器待做 |
+| `fh6-hud` — 中文界面 | ✅ 完成 | 默认中文，可切英文；行距按字形自动适配（见 ADR-013） |
+| `fh6-hud` — 背景透明化 | ✅ 完成 | 面板 / G 表 / 弹窗底衬均可调到 0（完全透明） |
+| `apps/desktop` — 图形化配置 | ✅ 完成 | Tauri 2，常驻托盘，启停两个进程、编辑配置 |
 
-**当前可用**：relay 分发 + HUD 实时显示。`--selftest` 可离屏渲染色样图用于核对。
-
-**当前可用的东西**：`fh6-relay` 已经可以编译运行，能实现在
-「飞智自适应扳机正常工作」的前提下，把遥测同时分发给任意多个本地程序。
+**当前可用**：relay 分发 + HUD 实时显示 + 图形化配置界面。
+`--selftest` 可离屏渲染色样图用于核对，`--capture` 可抓取真实绘制帧。
 
 ---
 
@@ -191,25 +193,127 @@ fh6-relay --help
 
 ---
 
+## 配置
+
+三个程序（`fh6-hud`、`fh6-relay`、图形界面）共用**同一份配置文件**
+`fh6-hud.config.json`，默认放在可执行文件同目录。
+
+```bash
+# HUD：读配置 + 用配置里的监听端点
+fh6-hud --config fh6-hud.config.json
+
+# relay：读同一份配置（监听端点、分发目标都在里面）
+fh6-relay --config fh6-hud.config.json
+
+# 紧急情况下也可以只用命令行，不碰配置文件
+fh6-relay --listen 127.0.0.1:5401 --to 127.0.0.1:5302
+```
+
+### 配置文件长这样
+
+```json
+{
+  "version": 1,
+  "hud": {
+    "language": "zh",
+    "network": { "listen_ip": "127.0.0.1", "listen_port": 5302 },
+    "global_scale": 1.0,
+    "input_panel":  { "x": 40, "y": 40,  "panel_opacity": 0.10 },
+    "g_meter":      { "backdrop_alpha": 0.12 },
+    "popup":        { "backdrop_alpha": 0.22 }
+  },
+  "relay": {
+    "listen_ip": "127.0.0.1",
+    "listen_port": 5301,
+    "targets": [
+      { "enabled": true, "host": "127.0.0.1", "port": 5300, "label": "飞智自适应扳机" },
+      { "enabled": true, "host": "127.0.0.1", "port": 5302, "label": "HUD" }
+    ]
+  },
+  "logging": { "enabled": false, "path": "logs/fh6-hud.log", "level": "info" },
+  "apps": { "auto_start": false, "close_to_tray": true }
+}
+```
+
+### 图形化配置界面
+
+```bash
+cd apps/desktop/src-tauri
+cargo build --release
+# 产物：target/release/fh6-hud-desktop.exe
+```
+
+界面提供：语言切换、全部透明度滑杆、两个监听端点、**分发目标的增删改**、
+日志开关、以及「启动 / 停止」两个进程。关闭窗口默认收到**系统托盘**常驻，
+真正退出走托盘菜单。
+
+> 边界情况都做了处理：配置文件损坏 → 回退默认值并提示；旧版本（只有外观参数）
+> 的配置 → **自动迁移**到新格式；分发目标与 relay 监听端点重合 → 自动禁用，
+> 避免 relay 转发给自己造成包风暴。
+
+#### 构建时的两个坑（都已在代码里解决）
+
+1. **`crate-type` 必须是纯 `rlib`**
+   Tauri 官方模板写的是 `["staticlib", "cdylib", "rlib"]`，那是为**移动端**准备的。
+   在 Windows + GNU 工具链下，`cdylib` 会把所有符号写进 `list.def`，链接时报
+   `error: export ordinal too large: 94449`（PE 导出序号上限 65535）。
+
+2. **必须显式指定 WebView2 的用户数据目录**
+   不指定时，实测本机会在创建 WebView 时失败
+   （`HRESULT 0x8000FFFF` 或 `os error 5 拒绝访问`），进程直接 panic。
+   程序会在**可执行文件同目录**建 `webview2-data/` 并通过
+   `WEBVIEW2_USER_DATA_FOLDER` 指过去，之后稳定可用。
+
+   > 若遇到「界面打不开」：先删掉 `webview2-data/` 再启动。
+   > 反复启动/强杀时，残留的 WebView2 浏览器进程可能短暂占着该目录，
+   > 表现为间歇性失败 —— 等几秒或删目录即可，不是程序缺陷。
+
+#### 首次构建很慢
+
+Tauri 的依赖树有 500+ 个 crate。国内网络下 crates.io 的 CDN 连接容易卡住
+（表现为 cargo 长时间无输出、`Established` 连接却无数据）。可用镜像：
+
+```bash
+cargo build --release \
+  --config 'source.crates-io.replace-with="rsproxy"' \
+  --config 'source.rsproxy.registry="sparse+https://rsproxy.cn/index/"'
+```
+
+---
+
 ## 工程结构
 
 ```
 fh6-hud-rs/
-├── Cargo.toml                  # workspace 根
+├── Cargo.toml                  # workspace 根（三个 crate）
 ├── LICENSE                     # MIT
 ├── README.md                   # 本文件（中英双文）
 ├── docs/
 │   ├── 架构决策.md              # ADR：为什么这样设计 + 实测依据
-│   └── 协议速查.md              # 88 字段偏移表 + 可信度分级
-└── crates/
-    ├── fh6-core/               # 纯逻辑库
-    │   ├── src/{lib,pack,raw,telemetry,derived}.rs
-    │   └── tests/derived_tests.rs
-    ├── fh6-relay/              # UDP 分发器
-    │   ├── src/{lib,main}.rs
-    │   └── tests/relay_tests.rs
-    └── fh6-hud/                # HUD（骨架）
-        └── src/main.rs
+│   ├── 协议速查.md              # 88 字段偏移表 + 可信度分级
+│   └── 配置文件说明.md          # 配置字段逐项说明
+├── crates/
+│   ├── fh6-config/             # 配置模型（HUD / relay / 日志 / 应用路径）
+│   │   └── src/{lib,settings,relay,logging,app,apps}.rs
+│   ├── fh6-core/               # 纯逻辑库
+│   │   ├── src/{lib,pack,raw,telemetry,derived,drift}.rs
+│   │   └── tests/{derived,drift}_tests.rs
+│   ├── fh6-relay/              # UDP 分发器
+│   │   ├── src/{lib,main}.rs
+│   │   └── tests/relay_tests.rs
+│   └── fh6-hud/                # HUD
+│       └── src/
+│           ├── gauge.rs        # 纯几何/配色（可测）
+│           ├── i18n.rs         # 中英文本 + 字形行距系数
+│           ├── raster.rs       # 软件光栅化
+│           ├── window.rs       # 分层透明窗口
+│           └── ...
+├── apps/
+│   └── desktop/                # 图形化配置界面（Tauri 2，独立 workspace）
+│       ├── src/{index.html,main.js,style.css}
+│       └── src-tauri/{Cargo.toml,tauri.conf.json,src/lib.rs}
+└── tools/
+    └── telemetry-probe.ps1     # 遥测链路探针（被动监听，不转发）
 ```
 
 ---
@@ -220,17 +324,19 @@ fh6-hud-rs/
 cargo test --workspace
 ```
 
-**84 个测试，全部不需要启动窗口或连接游戏**，整轮不到 1 秒。
+**266 个测试，全部不需要启动窗口或连接游戏**，整轮约 1 秒。
 
 | 测试组 | 数量 | 覆盖内容 |
 |---|---|---|
+| `fh6-config` 单元测试 | 65 | 参数夹紧与默认值、序列化往返、**旧版配置自动迁移**、日志轮转与时间戳格式、**自转发目标拦截**、原子保存、损坏配置回退 |
 | `fh6-core` 单元测试 | 6 | 结构体大小 = 324、偏移量互不重叠、短包报错、超长包忽略尾部 |
 | `fh6-core` 派生量测试 | 21 | 单位换算、漂移角、G 值符号与钳制、输入百分比、NaN 兜底、编解码往返 |
 | `fh6-core` 漂移状态机测试 | 36 | 反打量公式、保持计时防抖、FLOW/风险标签边界、状态机优先级、弹窗优先级与抗重复续期、SPIN SAVE 武装→恢复→冷却时序、GOD/CAT 彩蛋、帧率无关性 |
 | `fh6-core` 文档测试 | 3 | 公开 API 的使用示例 |
-| `fh6-relay` 单元测试 | 7 | 默认端口、参数解析、等号写法、错误处理 |
+| `fh6-hud` 库测试 | 104 | 仪表几何（角度→坐标、弧线采样、G 映射、脏区）、**中英文本穷尽性**（中文模式不得残留英文名词）、排版行距系数、软件光栅化图元、时序与帧率节流 |
+| `fh6-hud` 二进制测试 | 15 | 端口解析、参数解析、默认端点 |
+| `fh6-relay` 单元测试 | 8 | 默认端口、参数解析、等号写法、配置文件参数、错误处理 |
 | `fh6-relay` 端到端测试 | 8 | **真实 UDP 收发**：多目标扇出、逐字节透明、多包、目标不可达容错、短包、端口占用报错 |
-| `fh6-hud` 单元测试 | 3 | 端口解析 |
 
 ### 开发中被测试抓到的缺陷
 
@@ -331,18 +437,21 @@ minimize memory and CPU usage — and to solve a real-world annoyance:
 
 ### Status
 
-⚠️ **Work in progress.** The **data layer and fan-out relay are complete**;
-the HUD renderer is not implemented yet.
+✅ **Runnable.** Relay fan-out, the HUD renderer, and a GUI configurator all work.
 
 | Component | Status | Notes |
 |---|---|---|
 | `fh6-core` — packet parsing | ✅ Done | 324-byte packet, 88 fields, exact offset table, derived values |
 | `fh6-core` — drift state machine | ✅ Done | FLOW / SPIN RISK / counter-steer / style / events; pure logic, zero allocation |
-| `fh6-core` — tests | ✅ Done | 66 tests |
-| `fh6-relay` — UDP fan-out | ✅ Done | Usable CLI tool |
-| `fh6-relay` — e2e tests | ✅ Done | 15 tests over real UDP sockets |
-| `fh6-hud` — window & rendering | 🚧 Not implemented | CLI skeleton only |
-| `fh6-hud` — gauge drawing | 🚧 Not implemented | State machine ready, awaiting the renderer |
+| `fh6-config` — configuration model | ✅ Done | Appearance, endpoints, fan-out targets, logging — one file shared by all three programs |
+| `fh6-relay` — UDP fan-out | ✅ Done | Arbitrary number of targets, each independently enabled |
+| `fh6-hud` — window & rendering | ✅ Done | Layered transparent window + hand-written software rasterizer (ADR-011) |
+| `fh6-hud` — gauge drawing | ✅ Done | Angle gauge / G meter / input / slip / status panels / event popups |
+| `fh6-hud` — Chinese UI | ✅ Done | Chinese by default, switchable to English; line height adapts per script (ADR-013) |
+| `fh6-hud` — transparent background | ✅ Done | Panel / G-ring / popup backdrops can all be dialed to 0 |
+| `apps/desktop` — GUI configurator | ✅ Done | Tauri 2, lives in the system tray, starts/stops both processes |
+
+**Verified**: 266 tests pass; `cargo fmt --check` and `cargo clippy -D warnings` are clean.
 
 ### The problem it solves
 

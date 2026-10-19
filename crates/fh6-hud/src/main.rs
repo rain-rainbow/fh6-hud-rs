@@ -44,18 +44,13 @@ use std::time::{Duration, Instant};
 use fh6_core::drift::{DriftJudge, DriftSnapshot};
 use fh6_core::{derived, Frame, Telemetry};
 
+use fh6_config::settings::Settings;
+use fh6_config::{AppConfig, Language};
 use fh6_hud::gauge::{self, Bgra, DirtyRegion, Rect, Theme, TrailBuf};
-use fh6_hud::settings::Settings;
 use fh6_hud::shared::{LinkState, StopFlag, TelemetrySlot};
 use fh6_hud::timing::{FrameClock, MovingAverage};
 use fh6_hud::window::{Canvas, LayeredWindow, WindowOptions};
 use fh6_hud::{HudFrame, HudPainter};
-
-/// HUD 默认监听的端口。
-///
-/// 与 `fh6-relay` 的默认扇出目标一致：
-/// 游戏发 5301 → relay → 5300（飞智）+ 5302（本 HUD）。
-const DEFAULT_HUD_PORT: u16 = 5302;
 
 /// 收包缓冲区。数据包 324 字节，留足余量。
 const RECV_BUF: usize = 2048;
@@ -137,9 +132,10 @@ fn main() -> ExitCode {
 }
 
 /// 运行配置。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct Config {
-    listen: String,
+    /// 命令行显式指定的监听端点；`None` 表示取配置文件里的 `hud.network`。
+    listen: Option<String>,
     config_file: Option<String>,
     save_config: Option<String>,
     selftest_out: Option<String>,
@@ -153,21 +149,8 @@ struct Config {
     no_topmost: bool,
     /// 诊断模式：打印实测尺寸并在四角画标记，用于核对窗口是否 1:1 映射。
     diag: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            listen: format!("127.0.0.1:{DEFAULT_HUD_PORT}"),
-            config_file: None,
-            save_config: None,
-            selftest_out: None,
-            capture_out: None,
-            size: None,
-            no_topmost: false,
-            diag: false,
-        }
-    }
+    /// 命令行覆盖界面语言（`zh` / `en`）。
+    lang: Option<String>,
 }
 
 /// 解析后的动作。
@@ -188,7 +171,7 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
             "-V" | "--version" => return Ok(Action::Version),
             "-l" | "--listen" => {
                 i += 1;
-                cfg.listen = args.get(i).ok_or("--listen 需要一个地址")?.clone();
+                cfg.listen = Some(args.get(i).ok_or("--listen 需要一个地址")?.clone());
             }
             "-c" | "--config" => {
                 i += 1;
@@ -223,9 +206,15 @@ fn parse_args(args: &[String]) -> Result<Action, String> {
             }
             "--no-topmost" => cfg.no_topmost = true,
             "--diag" => cfg.diag = true,
+            "--lang" => {
+                i += 1;
+                cfg.lang = Some(args.get(i).ok_or("--lang 需要 zh 或 en")?.clone());
+            }
             other => {
                 if let Some(v) = other.strip_prefix("--listen=") {
-                    cfg.listen = v.to_string();
+                    cfg.listen = Some(v.to_string());
+                } else if let Some(v) = other.strip_prefix("--lang=") {
+                    cfg.lang = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--config=") {
                     cfg.config_file = Some(v.to_string());
                 } else if let Some(v) = other.strip_prefix("--save-config=") {
@@ -265,24 +254,64 @@ fn parse_size(s: &str) -> Result<(i32, i32), String> {
 }
 
 /// 加载设置。**容错**：文件不存在或损坏都用默认值，只打印提示，绝不因此退出。
-fn load_settings(cfg: &Config) -> Settings {
-    let Some(path) = &cfg.config_file else {
-        return Settings::default();
+/// 拆分 `地址:端口`。
+///
+/// 支持 `127.0.0.1:5302`、`0.0.0.0:5302`；也接受缺省地址的 `:5302`。
+fn split_host_port(s: &str) -> Option<(String, u16)> {
+    let s = s.trim();
+    let (ip, port) = match s.rsplit_once(':') {
+        Some(v) => v,
+        // 只给了端口号
+        None => ("127.0.0.1", s),
     };
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            let (s, note) = Settings::from_json(&text);
-            match note {
-                Some(n) => println!("配置 {path}: {n}"),
-                None => println!("配置 {path}: 已加载"),
+    let port: u16 = port.parse().ok()?;
+    let ip = if ip.trim().is_empty() {
+        "127.0.0.1".to_string()
+    } else {
+        ip.trim().to_string()
+    };
+    Some((ip, port))
+}
+
+/// 加载完整配置（HUD + relay + 日志），并应用命令行覆盖。
+///
+/// 优先级：**命令行 > 配置文件 > 内置默认值**。
+///
+/// 配置文件里的 `relay` 部分本进程不直接用（那是 `fh6-relay` 的），
+/// 但保留在 `AppConfig` 里整体读写，避免 HUD 的保存动作把 relay 配置抹掉。
+fn load_app_config(cfg: &Config) -> AppConfig {
+    let (mut app, note) = match &cfg.config_file {
+        Some(path) => AppConfig::load(std::path::Path::new(path)),
+        None => (AppConfig::default(), None),
+    };
+    if let Some(n) = note {
+        println!("配置: {n}");
+    } else if let Some(p) = &cfg.config_file {
+        println!("配置: 已加载 {p}");
+    }
+    // 命令行覆盖监听端点
+    if let Some(l) = &cfg.listen {
+        match split_host_port(l) {
+            Some((ip, port)) => {
+                app.hud.network.listen_ip = ip;
+                app.hud.network.listen_port = port;
             }
-            s
-        }
-        Err(e) => {
-            println!("配置 {path}: 读取失败（{e}），使用默认值");
-            Settings::default()
+            None => println!("[!] 无法解析 --listen `{l}`，改用配置里的端点"),
         }
     }
+    // 命令行覆盖语言
+    if let Some(l) = &cfg.lang {
+        app.hud.language = Language::parse(l);
+    }
+    app.sanitize();
+    app
+}
+
+/// 实际监听的端点：命令行优先，否则用配置里的。
+fn listen_endpoint(cfg: &Config, app: &AppConfig) -> String {
+    cfg.listen
+        .clone()
+        .unwrap_or_else(|| app.hud.network.endpoint())
 }
 
 /// 构造一帧用于自检的示例数据（不需要真的连游戏）。
@@ -328,7 +357,8 @@ fn demo_hud_frame() -> (Frame, DriftSnapshot) {
 
 /// 自检模式：离屏渲染并存成 BMP。
 fn run_selftest(cfg: &Config) -> Result<String, String> {
-    let settings = load_settings(cfg);
+    let app = load_app_config(cfg);
+    let settings = app.hud.clone();
     let (cw, ch) = cfg.size.unwrap_or((1920, 1080));
     let mut canvas = Canvas::new(cw, ch)?;
     canvas.clear_transparent();
@@ -477,18 +507,17 @@ fn draw_diag_markers(cv: &mut Canvas, settings: &Settings) {
 fn run_capture(cfg: &Config) -> Result<String, String> {
     use std::net::UdpSocket;
 
-    let settings = load_settings(cfg);
+    let app = load_app_config(cfg);
+    let settings = app.hud.clone();
     let (cw, ch) = cfg.size.unwrap_or((1920, 1080));
     let mut canvas = Canvas::new(cw, ch)?;
     canvas.clear_transparent();
 
-    println!(
-        "监听 {} 最多 3 秒以获取真实遥测（没有数据也能照常抓帧）...",
-        cfg.listen
-    );
+    let endpoint = listen_endpoint(cfg, &app);
+    println!("监听 {endpoint} 最多 3 秒以获取真实遥测（没有数据也能照常抓帧）...");
     let mut latest: Option<Telemetry> = None;
     let mut packet_count = 0u64;
-    match UdpSocket::bind(&cfg.listen) {
+    match UdpSocket::bind(&endpoint) {
         Ok(sock) => {
             let _ = sock.set_read_timeout(Some(Duration::from_millis(300)));
             let start = Instant::now();
@@ -514,7 +543,7 @@ fn run_capture(cfg: &Config) -> Result<String, String> {
             }
         }
         Err(e) => {
-            println!("  [!] 无法绑定 {}（{e}），将用默认零值抓帧。", cfg.listen);
+            println!("  [!] 无法绑定 {endpoint}（{e}），将用默认零值抓帧。");
             println!("      若 HUD 正在运行，这是正常的 —— 端口被它占着。");
         }
     }
@@ -563,12 +592,25 @@ fn run_capture(cfg: &Config) -> Result<String, String> {
 
 /// 实时模式。
 fn run_live(cfg: &Config) -> Result<(), String> {
-    let settings = load_settings(cfg);
+    let app = load_app_config(cfg);
+    let settings = app.hud.clone();
+    let endpoint = listen_endpoint(cfg, &app);
+
+    // ---- 0. 初始化日志（配置里没开启就什么也不做）----
+    app.init_logging("fh6-hud");
+    let log = fh6_config::Logger::global();
+    log.info(&format!(
+        "外观: 语言={} 面板透明度={:.2} G表底衬={:.2} 弹窗底衬={:.2}",
+        settings.language.as_str(),
+        settings.input_panel.panel_opacity,
+        settings.g_meter.backdrop_alpha,
+        settings.popup.backdrop_alpha
+    ));
 
     // ---- 1. 启动收包线程 ----
     let slot = Arc::new(TelemetrySlot::new());
     let stop = Arc::new(StopFlag::new());
-    let receiver = spawn_receiver(cfg.listen.clone(), Arc::clone(&slot), Arc::clone(&stop))?;
+    let receiver = spawn_receiver(endpoint.clone(), Arc::clone(&slot), Arc::clone(&stop))?;
 
     // ---- 2. 创建窗口 ----
     let opts = match cfg.size {
@@ -583,11 +625,16 @@ fn run_live(cfg: &Config) -> Result<(), String> {
     let mut win = LayeredWindow::create(opts)?;
 
     println!("fh6-hud {} —— FH6 HUD", env!("CARGO_PKG_VERSION"));
-    println!("遥测来源: {}", cfg.listen);
+    println!("遥测来源: {endpoint}");
+    println!("界面语言: {}", settings.language.display_name());
     println!(
         "窗口尺寸: {}x{} @ ({}, {})",
         opts.width, opts.height, opts.x, opts.y
     );
+    log.info(&format!(
+        "窗口 {}x{} @ ({},{})，监听 {endpoint}",
+        opts.width, opts.height, opts.x, opts.y
+    ));
     if cfg.diag {
         // 诊断模式：把「我们以为的尺寸」全部打出来，并在四角画标记。
         // 用途：如果截图上标记不在画面四角，说明窗口没有 1:1 铺满屏幕。
@@ -631,9 +678,11 @@ fn run_live(cfg: &Config) -> Result<(), String> {
     let _ = receiver.join();
 
     if let Some(path) = &cfg.save_config {
-        match std::fs::write(path, settings.to_json()) {
-            Ok(_) => println!("已保存参数到 {path}"),
-            Err(e) => eprintln!("保存参数失败: {e}"),
+        // 保存的是**完整** AppConfig（含 relay 与日志段），
+        // 这样 HUD 的保存动作不会把 relay 的配置抹掉。
+        match app.save(std::path::Path::new(path)) {
+            Ok(_) => println!("已保存完整配置到 {path}"),
+            Err(e) => eprintln!("保存配置失败: {e}"),
         }
     }
 
@@ -894,15 +943,56 @@ mod tests {
 
     #[test]
     fn 默认监听5302端口() {
-        assert_eq!(Config::default().listen, "127.0.0.1:5302");
-        assert_eq!(DEFAULT_HUD_PORT, 5302);
+        // 命令行未指定 --listen 时，端点取自配置里的 hud.network。
+        // 默认值与 fh6-relay 的默认扇出目标一致：
+        // 游戏发 5301 → relay → 5300（飞智）+ 5302（本 HUD）。
+        assert_eq!(Config::default().listen, None);
+        let app = AppConfig::default();
+        assert_eq!(app.hud.network.listen_port, 5302);
+        assert_eq!(app.hud.network.endpoint(), "127.0.0.1:5302");
+    }
+
+    #[test]
+    fn 监听地址拆分支持多种写法() {
+        assert_eq!(
+            split_host_port("127.0.0.1:5302"),
+            Some(("127.0.0.1".to_string(), 5302))
+        );
+        // 只给端口：地址回退到回环
+        assert_eq!(
+            split_host_port(":5302"),
+            Some(("127.0.0.1".to_string(), 5302))
+        );
+        // 纯端口号也接受
+        assert_eq!(
+            split_host_port("5400"),
+            Some(("127.0.0.1".to_string(), 5400))
+        );
+        // 允许监听全部接口
+        assert_eq!(
+            split_host_port("0.0.0.0:5302"),
+            Some(("0.0.0.0".to_string(), 5302))
+        );
+        // 前后空白被忽略
+        assert_eq!(
+            split_host_port("  127.0.0.1:5301  "),
+            Some(("127.0.0.1".to_string(), 5301))
+        );
+        // 非法输入
+        assert_eq!(split_host_port("127.0.0.1:abc"), None);
+        assert_eq!(
+            split_host_port("127.0.0.1:99999"),
+            None,
+            "端口超出 u16 范围"
+        );
+        assert_eq!(split_host_port(""), None);
     }
 
     #[test]
     fn 参数解析默认进入实时模式() {
         match parse_args(&[]).unwrap() {
             Action::Run(c) => {
-                assert_eq!(c.listen, "127.0.0.1:5302");
+                assert_eq!(c.listen, None, "未指定 --listen 时应为 None（端点取配置）");
                 assert!(c.selftest_out.is_none());
             }
             _ => panic!("默认应为实时模式"),
@@ -948,7 +1038,7 @@ mod tests {
         .unwrap()
         {
             Action::Run(c) => {
-                assert_eq!(c.listen, "127.0.0.1:5400");
+                assert_eq!(c.listen.as_deref(), Some("127.0.0.1:5400"));
                 assert_eq!(c.size, Some((1280, 720)));
             }
             _ => panic!("应为实时模式"),

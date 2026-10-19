@@ -1,5 +1,6 @@
-# Rust 构建产物
+# Rust 构建产物（含 GUI 的独立 workspace）
 /target
+**/target
 **/*.rs.bk
 *.pdb
 
@@ -21,3 +22,6 @@ desktop.ini
 
 # 本地产物
 /dist/
+
+# 前端
+node_modules/

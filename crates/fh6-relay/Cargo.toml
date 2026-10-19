@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 fh6-core = { workspace = true }
+fh6-config = { workspace = true }
 
 [dev-dependencies]
 # 集成测试用真实 UDP 收发验证转发链，仅需标准库

@@ -1,0 +1,11 @@
+[package]
+name = "fh6-config"
+description = "FH6 HUD 的配置模型：外观参数、网络端点、relay 分发目标、日志设置"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

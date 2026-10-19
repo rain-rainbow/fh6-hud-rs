@@ -45,8 +45,8 @@
 
 pub mod gauge;
 pub mod hud;
+pub mod i18n;
 pub mod raster;
-pub mod settings;
 pub mod shared;
 pub mod textmask;
 pub mod timing;
@@ -55,8 +55,11 @@ pub mod window;
 
 pub use gauge::{Bgra, DirtyRegion, Rect, Theme, TrailBuf};
 pub use hud::{BarItem, HudFrame, HudPainter};
+pub use i18n::{Labels, UiText};
 pub use raster::{Rasterizer, TextAlign};
-pub use settings::{Settings, SETTINGS_VERSION};
+// 配置模型已迁至 h6-config（多个二进制与 GUI 共享）。这里重导出以保持兼容。
+pub use fh6_config::settings;
+pub use fh6_config::{Settings, SETTINGS_VERSION};
 pub use shared::{LinkState, StopFlag, TelemetrySlot};
 pub use timing::{FrameClock, MovingAverage};
 pub use window::{Canvas, KeyEvent, LayeredWindow, WindowOptions};

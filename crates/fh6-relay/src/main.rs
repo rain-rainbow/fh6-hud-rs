@@ -43,31 +43,23 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use fh6_config::AppConfig;
 use fh6_relay::{parse_host_port, should_log, Rate, Relay};
-
-/// 本 relay 默认监听的端口。
-///
-/// 选 5301 是因为飞智占着 5300；同时官方 FH6 文档特别提醒：
-/// `Avoid ports 5200 through 5300, as the game binds its own outgoing socket
-/// to a port in this range.` —— 5301 刚好避开这个「游戏自用」区间。
-const DEFAULT_LISTEN_PORT: u16 = 5301;
-
-/// 默认转发目标：飞智（5300）与 HUD（5302）。
-///
-/// 顺序有意把飞智放第一：万一将来需要按顺序降级，优先保证扳机不失效。
-const DEFAULT_TARGETS: [(&str, u16); 2] = [
-    ("127.0.0.1", fh6_core::FLYDIGI_FORZA_PORT),
-    ("127.0.0.1", 5302),
-];
 
 /// 日志输出间隔。
 const LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 命令行配置。
-struct Config {
-    listen: SocketAddr,
+///
+/// 所有字段都是 `Option`/可为空：解析阶段**不填默认值**，目的是把
+/// 「命令行是否显式指定」这件事保留到与配置文件合并的那一刻。
+/// 合并优先级：命令行 > 配置文件 > 内置默认值。
+#[derive(Debug, Default)]
+struct CliConfig {
+    config_file: Option<String>,
+    listen: Option<SocketAddr>,
     targets: Vec<(String, u16)>,
-    verbose: bool,
+    verbose: Option<bool>,
 }
 
 const HELP: &str = "\
@@ -77,12 +69,18 @@ fh6-relay — FH6 遥测 UDP 分发器
     fh6-relay [选项]
 
 选项:
-    -l, --listen <IP:端口>    监听地址，默认 127.0.0.1:5301
+    -c, --config <文件>       读取完整配置（与 GUI 共用同一份 AppConfig）
+    -l, --listen <IP:端口>    监听地址，默认取配置或 127.0.0.1:5301
     -t, --to <IP:端口>        追加一个转发目标（可重复）
-                              默认转发到 127.0.0.1:5300（飞智）与 127.0.0.1:5302（HUD）
+                              未指定时用配置里的目标；配置也没有则用
+                              127.0.0.1:5300（飞智）与 127.0.0.1:5302（HUD）
     -v, --verbose             打印每个数据包的简要信息（调试用，会显著增加 I/O）
     -h, --help                显示本帮助
     -V, --version             显示版本
+
+说明:
+    分发目标的地址、端口、数量都可以在配置文件里任意增删，
+    也可以用 --to 临时追加/覆盖。用 `--to` 指定时不再使用配置文件里的目标。
 
 游戏内设置（SETTINGS > HUD AND GAMEPLAY）:
     数据输出          = 开启
@@ -92,6 +90,9 @@ fh6-relay — FH6 遥测 UDP 分发器
 示例:
     # 默认：收 5301，转发给飞智(5300) 和 HUD(5302)
     fh6-relay
+
+    # 用配置文件（GUI 生成的那份）
+    fh6-relay --config fh6-hud.config.json
 
     # 再加一个 SimHub
     fh6-relay --to 127.0.0.1:8001
@@ -124,13 +125,11 @@ fn main() -> ExitCode {
 }
 
 /// 解析命令行参数。返回 `Ok(None)` 表示「打印帮助/版本后正常退出」。
-fn parse_args<I>(args: I) -> Result<Option<Config>, String>
+fn parse_args<I>(args: I) -> Result<Option<CliConfig>, String>
 where
     I: Iterator<Item = String>,
 {
-    let mut listen: Option<SocketAddr> = None;
-    let mut targets: Vec<(String, u16)> = Vec::new();
-    let mut verbose = false;
+    let mut cfg = CliConfig::default();
 
     let mut it = args;
     while let Some(arg) = it.next() {
@@ -140,21 +139,27 @@ where
                 println!("fh6-relay {}", env!("CARGO_PKG_VERSION"));
                 return Ok(None);
             }
-            "-v" | "--verbose" => verbose = true,
+            "-v" | "--verbose" => cfg.verbose = Some(true),
+            "-c" | "--config" => {
+                let v = it.next().ok_or("--config 需要一个文件路径")?;
+                cfg.config_file = Some(v);
+            }
             "-l" | "--listen" => {
                 let v = it.next().ok_or("--listen 需要一个地址参数")?;
-                listen = Some(resolve_addr(&v)?);
+                cfg.listen = Some(resolve_addr(&v)?);
             }
             "-t" | "--to" => {
                 let v = it.next().ok_or("--to 需要一个地址参数")?;
-                targets.push(parse_host_port(&v)?);
+                cfg.targets.push(parse_host_port(&v)?);
             }
             other => {
                 // 支持 --listen=127.0.0.1:5301 这种等号写法
                 if let Some(rest) = other.strip_prefix("--listen=") {
-                    listen = Some(resolve_addr(rest)?);
+                    cfg.listen = Some(resolve_addr(rest)?);
                 } else if let Some(rest) = other.strip_prefix("--to=") {
-                    targets.push(parse_host_port(rest)?);
+                    cfg.targets.push(parse_host_port(rest)?);
+                } else if let Some(rest) = other.strip_prefix("--config=") {
+                    cfg.config_file = Some(rest.to_string());
                 } else {
                     return Err(format!("无法识别的参数 `{other}`"));
                 }
@@ -162,23 +167,7 @@ where
         }
     }
 
-    if targets.is_empty() {
-        targets = DEFAULT_TARGETS
-            .iter()
-            .map(|(h, p)| ((*h).to_string(), *p))
-            .collect();
-    }
-
-    let listen = match listen {
-        Some(a) => a,
-        None => SocketAddr::from(([127, 0, 0, 1], DEFAULT_LISTEN_PORT)),
-    };
-
-    Ok(Some(Config {
-        listen,
-        targets,
-        verbose,
-    }))
+    Ok(Some(cfg))
 }
 
 /// 解析 `IP:端口` 或 `主机:端口` 为套接字地址。
@@ -193,13 +182,66 @@ fn resolve_addr(s: &str) -> Result<SocketAddr, String> {
 }
 
 /// 主循环：绑定端口后持续收包并原样转发。
-fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    let mut relay = Relay::bind(config.listen, &config.targets).map_err(|e| {
+///
+/// 配置来源合并顺序（后者覆盖前者）：
+/// 内置默认值 → 配置文件中的 `relay` 段 → 命令行参数。
+fn run(cli: CliConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // ---- 1. 读配置文件 ----
+    let (mut app, note) = match &cli.config_file {
+        Some(p) => AppConfig::load(std::path::Path::new(p)),
+        None => (AppConfig::default(), None),
+    };
+    if let Some(n) = note {
+        eprintln!("配置: {n}");
+    } else if let Some(p) = &cli.config_file {
+        println!("配置: 已加载 {p}");
+    }
+
+    // ---- 2. 命令行覆盖 ----
+    if let Some(a) = cli.listen {
+        app.relay.listen_ip = a.ip().to_string();
+        app.relay.listen_port = a.port();
+    }
+    if !cli.targets.is_empty() {
+        // 显式给了 --to 就完全替换配置文件里的目标列表
+        app.relay.targets = cli
+            .targets
+            .iter()
+            .map(|(h, p)| fh6_config::RelayTarget::new(h, *p, ""))
+            .collect();
+    }
+    if let Some(v) = cli.verbose {
+        app.relay.verbose = v;
+    }
+    let fixed = app.relay.sanitize();
+    if fixed {
+        eprintln!("[!] relay 配置有项被修正（自转发目标已禁用 / 无效目标已剔除）");
+    }
+    if let Some(p) = &cli.config_file {
+        // 配置里若声明了日志，就用它
+        let _ = p;
+    }
+
+    // ---- 3. 初始化日志 ----
+    app.init_logging("fh6-relay");
+    let log = fh6_config::Logger::global();
+
+    let listen_ip = app.relay.listen_ip.clone();
+    let listen_port = app.relay.listen_port;
+    let listen = resolve_addr(&format!("{listen_ip}:{listen_port}"))
+        .map_err(|e| format!("监听地址无法解析: {e}"))?;
+    let targets = app.relay.enabled_targets();
+    let verbose = app.relay.verbose;
+
+    if targets.is_empty() {
+        return Err("没有任何启用的分发目标：请在配置文件里至少启用一个目标".into());
+    }
+
+    let mut relay = Relay::bind(listen, &targets).map_err(|e| {
         format!(
-            "无法绑定 {}: {e}\n\
+            "无法绑定 {listen}: {e}\n\
              提示：该端口可能已被占用。可用 `netstat -ano -p UDP | findstr :{}` 查看。",
-            config.listen,
-            config.listen.port()
+            listen.port()
         )
     })?;
 
@@ -213,6 +255,10 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     for (label, addr) in relay.targets() {
         println!("转发: {actual} -> {label}  ({addr})");
     }
+    println!("目标数量: {}", targets.len());
+    if app.logging.enabled {
+        println!("日志文件: {}", app.logging.path);
+    }
     println!();
     println!("游戏内请设置（SETTINGS > HUD AND GAMEPLAY）:");
     println!("    数据输出       = 开启");
@@ -222,8 +268,17 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     println!("按 Ctrl+C 退出。");
     println!();
 
+    log.info(&format!(
+        "relay 已绑定 {actual}，{} 个目标: {}",
+        targets.len(),
+        targets
+            .iter()
+            .map(|(h, p)| format!("{h}:{p}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+
     let mut last_log = Instant::now();
-    let verbose = config.verbose;
     let mut since_last_log = 0u64;
 
     relay.set_read_timeout(Some(Duration::from_millis(250)))?;
@@ -235,9 +290,13 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 if verbose {
                     println!("[{since_last_log}] 收到 {len} 字节");
                 }
+                log.debug(&format!("收到 {len} 字节"));
             }
             Ok(None) => {}
-            Err(e) => return Err(Box::new(e)),
+            Err(e) => {
+                log.error(&format!("收包失败: {e}"));
+                return Err(Box::new(e));
+            }
         }
 
         if should_log(last_log, LOG_INTERVAL) {
@@ -261,6 +320,7 @@ fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 line.push_str(&format!(" | 来源{s}"));
             }
             println!("{line}");
+            log.info(&line);
             last_log = Instant::now();
         }
     }
@@ -273,17 +333,38 @@ mod tests {
 
     #[test]
     fn 默认配置应监听5301并转发到5300与5302() {
-        let cfg = parse_args(std::iter::empty()).unwrap().unwrap();
-        assert_eq!(cfg.listen.port(), DEFAULT_LISTEN_PORT);
-        assert_eq!(cfg.listen.port(), 5301);
-        assert_eq!(cfg.targets.len(), 2);
-        assert_eq!(cfg.targets[0], ("127.0.0.1".to_string(), 5300));
-        assert_eq!(cfg.targets[1], ("127.0.0.1".to_string(), 5302));
+        // 命令行不带参数时，解析结果里不应有「显式指定」的项，
+        // 真正的默认值来自 AppConfig（配置文件缺字段时也取它）。
+        let cli = parse_args(std::iter::empty()).unwrap().unwrap();
+        assert!(cli.listen.is_none(), "未指定 --listen 时应为 None");
+        assert!(cli.targets.is_empty(), "未指定 --to 时不应有目标");
+        assert!(cli.verbose.is_none());
+
+        let app = AppConfig::default();
+        assert_eq!(app.relay.listen_port, 5301);
+        assert_eq!(app.relay.listen_ip, "127.0.0.1");
+        let t = app.relay.enabled_targets();
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0], ("127.0.0.1".to_string(), 5300));
+        assert_eq!(t[1], ("127.0.0.1".to_string(), 5302));
         assert_eq!(
-            cfg.targets[0].1,
+            t[0].1,
             fh6_core::FLYDIGI_FORZA_PORT,
             "默认第一个目标必须是飞智的端口常量"
         );
+    }
+
+    #[test]
+    fn 支持配置文件参数两种写法() {
+        let a = parse_args(vec!["--config".to_string(), "x.json".to_string()].into_iter())
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.config_file.as_deref(), Some("x.json"));
+        let b = parse_args(vec!["--config=x.json".to_string()].into_iter())
+            .unwrap()
+            .unwrap();
+        assert_eq!(b.config_file.as_deref(), Some("x.json"));
+        assert!(parse_args(vec!["--config".to_string()].into_iter()).is_err());
     }
 
     #[test]
@@ -303,7 +384,7 @@ mod tests {
             "--to=127.0.0.1:8001".to_string(),
         ];
         let cfg = parse_args(args.into_iter()).unwrap().unwrap();
-        assert_eq!(cfg.listen.port(), 5400);
+        assert_eq!(cfg.listen.map(|a| a.port()), Some(5400));
         assert_eq!(cfg.targets.len(), 3);
     }
 

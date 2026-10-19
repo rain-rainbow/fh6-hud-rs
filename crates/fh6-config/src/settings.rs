@@ -72,9 +72,16 @@ ranged!(GlowLayers, 0.0, 8.0, 3.0);
 
 // ---- 透明度 ----
 ranged!(Opacity, 0.0, 1.0, 1.0);
-ranged!(PanelOpacity, 0.0, 1.0, 0.55);
-ranged!(ScanlineAlpha, 0.0, 1.0, 0.12);
+// 面板底衬的不透明度。
+// **默认值刻意压得很低（0.10）**：HUD 的价值在于「看得见游戏画面」，
+// 底衬过重会像贴了一块黑板。文字可读性靠描边解决，而不是靠底色。
+ranged!(PanelOpacity, 0.0, 1.0, 0.10);
+ranged!(ScanlineAlpha, 0.0, 1.0, 0.06);
 ranged!(HalftoneDensity, 0.0, 1.0, 0.0);
+// 圆形仪表（G 表）底衬的不透明度。
+ranged!(RingBackdropAlpha, 0.0, 1.0, 0.12);
+// 弹窗底衬的不透明度。
+ranged!(PopupBackdropAlpha, 0.0, 1.0, 0.22);
 
 // ---- 位置与缩放 ----
 ranged!(Pos, -4000.0, 4000.0, 0.0);
@@ -181,6 +188,8 @@ pub struct GMeterParams {
     pub show_trail: bool,
     /// 钩子圆点半径。
     pub dot_radius: f32,
+    /// 圆环底衬的不透明度（0 = 完全透明，只留线条）。
+    pub backdrop_alpha: f32,
 }
 
 impl Default for GMeterParams {
@@ -195,6 +204,7 @@ impl Default for GMeterParams {
             show_grid: true,
             show_trail: true,
             dot_radius: 5.0,
+            backdrop_alpha: RingBackdropAlpha::DEFAULT,
         }
     }
 }
@@ -209,6 +219,7 @@ impl GMeterParams {
         self.max_g = GMaxScale::clamp_value(self.max_g);
         self.trail_alpha = TrailAlpha::clamp_value(self.trail_alpha);
         self.dot_radius = BarThickness::clamp_value(self.dot_radius);
+        self.backdrop_alpha = RingBackdropAlpha::clamp_value(self.backdrop_alpha);
     }
 }
 
@@ -295,6 +306,8 @@ pub struct PopupParams {
     pub outline_layers: u32,
     /// 是否显示长按进度条。
     pub show_hold_meter: bool,
+    /// 弹窗底衬的不透明度（0 = 完全不画底衬）。
+    pub backdrop_alpha: f32,
 }
 
 impl Default for PopupParams {
@@ -308,6 +321,7 @@ impl Default for PopupParams {
             hero_scale: 1.35,
             outline_layers: 3,
             show_hold_meter: true,
+            backdrop_alpha: PopupBackdropAlpha::DEFAULT,
         }
     }
 }
@@ -321,6 +335,7 @@ impl PopupParams {
         self.scale = PopupScale::clamp_value(self.scale);
         self.hero_scale = PopupScale::clamp_value(self.hero_scale);
         self.outline_layers = self.outline_layers.min(8);
+        self.backdrop_alpha = PopupBackdropAlpha::clamp_value(self.backdrop_alpha);
     }
 }
 
@@ -369,9 +384,98 @@ impl PerfParams {
     }
 }
 
+/// 界面语言。
+///
+/// HUD 上的标签（油门/刹车/流畅度/风险…）与事件弹窗文案都会随它切换。
+/// 默认中文 —— 目标用户是中文玩家，英文名词堆在仪表上会增加认知负担。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    /// 简体中文（默认）。
+    #[default]
+    Zh,
+    /// 英文。
+    En,
+}
+
+impl Language {
+    /// 从字符串解析；无法识别时回退到默认（中文），不报错。
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "en" | "eng" | "english" => Language::En,
+            _ => Language::Zh,
+        }
+    }
+
+    /// 反解成配置里的字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Language::Zh => "zh",
+            Language::En => "en",
+        }
+    }
+
+    /// 供界面显示的名称。
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Language::Zh => "中文",
+            Language::En => "English",
+        }
+    }
+}
+
+/// 遥测接收端点（HUD 监听什么地址、什么端口）。
+///
+/// 之所以放进配置而不是只留命令行参数：用户在 GUI 里改完就该长期生效，
+/// 不该每次启动都敲一遍参数。命令行仍可覆盖（优先级更高）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkConfig {
+    /// 监听地址。默认 `127.0.0.1`。
+    ///
+    /// 一般只填本地回环；填 `0.0.0.0` 可接收局域网其他机器的遥测，
+    /// 但这会把端口暴露到网络，需自行评估。
+    pub listen_ip: String,
+    /// 监听端口。默认 5302（relay 的第二个扇出目标）。
+    pub listen_port: u16,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            listen_ip: "127.0.0.1".to_string(),
+            listen_port: 5302,
+        }
+    }
+}
+
+impl NetworkConfig {
+    /// 校验并规范化。
+    ///
+    /// * 地址为空 → 回退 `127.0.0.1`；
+    /// * 端口为 0 → 回退默认端口；
+    /// * 地址过长 → 截断（防止畸形配置撑爆内存）。
+    pub fn sanitize(&mut self) {
+        let ip = self.listen_ip.trim();
+        if ip.is_empty() || ip.len() > 64 {
+            self.listen_ip = "127.0.0.1".to_string();
+        } else {
+            self.listen_ip = ip.to_string();
+        }
+        if self.listen_port == 0 {
+            self.listen_port = 5302;
+        }
+    }
+
+    /// 组合成 `ip:port` 字符串。
+    pub fn endpoint(&self) -> String {
+        format!("{}:{}", self.listen_ip, self.listen_port)
+    }
+}
+
 /// HUD 的完整参数集合。
 ///
-/// 含 `String`（主题名），因此**不是** `Copy`；但它是 `Clone`，
+/// 含 `String`（主题名、监听地址），因此**不是** `Copy`；但它是 `Clone`，
 /// 渲染层可以克隆一份快照后自行取用，无需加锁。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -380,6 +484,10 @@ pub struct Settings {
     pub version: u32,
     /// 主题名称（保存时用）。
     pub theme_name: String,
+    /// 界面语言（中文 / 英文）。
+    pub language: Language,
+    /// 遥测接收端点。
+    pub network: NetworkConfig,
     /// 全局缩放。
     pub global_scale: f32,
     /// 全局水平偏移。
@@ -410,6 +518,8 @@ impl Default for Settings {
         Self {
             version: SETTINGS_VERSION,
             theme_name: "default".to_string(),
+            language: Language::default(),
+            network: NetworkConfig::default(),
             global_scale: 1.0,
             offset_x: 0.0,
             offset_y: 0.0,
@@ -422,12 +532,12 @@ impl Default for Settings {
             },
             slip_panel: BarPanelParams {
                 x: 40.0,
-                y: 220.0,
+                y: 250.0,
                 ..Default::default()
             },
             flow_panel: BarPanelParams {
                 x: 40.0,
-                y: 400.0,
+                y: 470.0,
                 ..Default::default()
             },
             popup: PopupParams::default(),
@@ -445,21 +555,27 @@ impl Settings {
     /// 返回 `true` 表示发生了修正（调用方可用于提示用户或标记需要保存）。
     pub fn sanitize(&mut self) -> bool {
         // 先记录「受影响字段」的原始值用于变更检测。
-        // 不克隆整个 Settings —— 里面有 String，克隆是浪费；而且逐个比较
+        // 不克隆整个 Settings —— 里面有多处 String，克隆是浪费；而且逐个比较
         // 字段能精确表达「夹紧只影响这些字段」。
+        // 注意：Rust 只为标准库元组实现到 12 个元素的 PartialEq，
+        // 所以这里嵌成三层，而不是写成一个 14 元组。
         let before = (
-            self.global_scale,
-            self.offset_x,
-            self.offset_y,
-            self.angle,
-            self.g_meter,
-            self.input_panel,
-            self.slip_panel,
-            self.flow_panel,
-            self.popup,
-            self.perf,
-            self.version,
-            self.theme_name.len(),
+            (self.global_scale, self.offset_x, self.offset_y),
+            (
+                self.angle,
+                self.g_meter,
+                self.input_panel,
+                self.slip_panel,
+                self.flow_panel,
+                self.popup,
+                self.perf,
+            ),
+            (
+                self.version,
+                self.theme_name.clone(),
+                self.language,
+                self.network.clone(),
+            ),
         );
 
         self.global_scale = Scale::clamp_value(self.global_scale);
@@ -472,6 +588,7 @@ impl Settings {
         self.flow_panel.sanitize();
         self.popup.sanitize();
         self.perf.sanitize();
+        self.network.sanitize();
 
         if self.version == 0 {
             self.version = SETTINGS_VERSION;
@@ -481,18 +598,22 @@ impl Settings {
         }
 
         let after = (
-            self.global_scale,
-            self.offset_x,
-            self.offset_y,
-            self.angle,
-            self.g_meter,
-            self.input_panel,
-            self.slip_panel,
-            self.flow_panel,
-            self.popup,
-            self.perf,
-            self.version,
-            self.theme_name.len(),
+            (self.global_scale, self.offset_x, self.offset_y),
+            (
+                self.angle,
+                self.g_meter,
+                self.input_panel,
+                self.slip_panel,
+                self.flow_panel,
+                self.popup,
+                self.perf,
+            ),
+            (
+                self.version,
+                self.theme_name.clone(),
+                self.language,
+                self.network.clone(),
+            ),
         );
 
         before != after
