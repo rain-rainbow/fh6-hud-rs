@@ -513,10 +513,17 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     //
     // 之前只在 `default_window_icon()` 为 Some 时才设置图标；若它为 None，
     // 托盘项就没有图像 —— 系统虽然登记了图标，但通知区里看不见。
-    match tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png")) {
+    match tauri::image::Image::from_bytes(include_bytes!("../icons/tray-32.png")) {
         Ok(img) => {
             let (w, h) = (img.width(), img.height());
-            fh6_config::Logger::global().info(&format!("托盘图标：内嵌 PNG {w}x{h}"));
+            // 记录中心像素的 alpha：若为 0，说明图标是透明的 —— 那样即使登记成功，
+            // 通知区里也看不见任何东西。这条日志用于区分「没登记」与「登记了但看不见」。
+            let rgba = img.rgba();
+            let idx = ((h / 2) as usize * w as usize + (w / 2) as usize) * 4;
+            let alpha = rgba.get(idx + 3).copied().unwrap_or(255);
+            fh6_config::Logger::global().info(&format!(
+                "托盘图标：内嵌 PNG {w}x{h}，中心像素 alpha={alpha}"
+            ));
             builder = builder.icon(img);
         }
         Err(e) => {
