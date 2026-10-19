@@ -54,6 +54,7 @@
         <button class="btn" id="btn-save">保存并应用</button>
         <button class="btn" id="btn-restart">重启以应用</button>
         <button class="btn" id="btn-reload">重载</button>
+        <button class="btn" id="btn-logview">查看日志</button>
         <button class="btn" id="btn-log">打开日志目录</button>
       </div>
     </section>
@@ -252,6 +253,22 @@
       </div>
     </section>
   </main>
+
+  <div id="log-overlay" class="overlay hidden">
+    <div class="dialog wide">
+      <h3>日志（末尾 200 行）</h3>
+      <div class="log-tabs">
+        <button class="btn tiny active" id="log-tab-hud">HUD</button>
+        <button class="btn tiny" id="log-tab-relay">relay</button>
+        <button class="btn tiny" id="log-reload">刷新</button>
+        <span class="hint" id="log-path"></span>
+      </div>
+      <pre id="log-content" class="log-view">（尚未读取）</pre>
+      <div class="actions">
+        <button class="btn" id="log-close">关闭</button>
+      </div>
+    </div>
+  </div>
 
   <div id="close-overlay" class="overlay hidden">
     <div class="dialog">

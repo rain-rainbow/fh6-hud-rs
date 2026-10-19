@@ -42,6 +42,27 @@ function toast(msg, kind = 'ok') {
 // 与 toast 的分工：toast 只用于「已保存」这类一眼即知的结果；
 // **失败**必须留在界面上 —— 启动失败的原因（找不到 exe、端口被占）
 // 需要用户能反复阅读，弹一下就消失等于没提示。
+// 复制文本到剪贴板。
+//
+// 不用 navigator.clipboard：它在 tauri:// 自定义协议下可能不在安全上下文里而被拒。
+// 隐藏 textarea + document.execCommand('copy') 在 WebView2 里表现稳定。
+function copyText(text) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    return true;
+  } catch (e) {
+    console.error('复制失败', e);
+    return false;
+  }
+}
+
 function setActionMsg(text, kind = '') {
   const el = document.getElementById('action-msg');
   if (!text) {
@@ -326,11 +347,74 @@ function bind() {
     }
   });
 
+  // ---- 界面内日志查看（不依赖 explorer）----
+  let logViews = [];
+  let logTab = 'hud';
+
+  function renderLogTab() {
+    const view = logViews.find((v) => v.name === logTab);
+    const pre = document.getElementById('log-content');
+    const pathEl = document.getElementById('log-path');
+    if (!view) {
+      pre.textContent = '（没有数据）';
+      pathEl.textContent = '';
+      return;
+    }
+    pathEl.textContent = view.path;
+    if (!view.exists) {
+      pre.textContent = `日志文件不存在：\n${view.path}\n\n请在「日志文件」区启用日志并保存，然后重启 HUD/relay。`;
+    } else if (!view.content) {
+      pre.textContent = '（文件是空的）';
+    } else {
+      pre.textContent = view.content;
+      pre.scrollTop = pre.scrollHeight;
+    }
+    document.getElementById('log-tab-hud').classList.toggle('active', logTab === 'hud');
+    document.getElementById('log-tab-relay').classList.toggle('active', logTab === 'relay');
+  }
+
+  async function refreshLogs() {
+    try {
+      logViews = await invoke('read_logs', { config: collectForm(), maxLines: 200 });
+      renderLogTab();
+    } catch (e) {
+      document.getElementById('log-content').textContent = `读取日志失败：${e}`;
+    }
+  }
+
+  document.getElementById('btn-logview').addEventListener('click', async () => {
+    document.getElementById('log-overlay').classList.remove('hidden');
+    await refreshLogs();
+  });
+  document.getElementById('log-tab-hud').addEventListener('click', () => {
+    logTab = 'hud';
+    renderLogTab();
+  });
+  document.getElementById('log-tab-relay').addEventListener('click', () => {
+    logTab = 'relay';
+    renderLogTab();
+  });
+  document.getElementById('log-reload').addEventListener('click', refreshLogs);
+  document.getElementById('log-close').addEventListener('click', () => {
+    document.getElementById('log-overlay').classList.add('hidden');
+  });
+
   document.getElementById('btn-log').addEventListener('click', async () => {
     try {
-      await invoke('open_log_dir', { config: collectForm() });
+      const r = await invoke('open_log_dir', { config: collectForm() });
+      if (r.opened) {
+        setActionMsg(`已在资源管理器中打开：${r.path}`, 'ok');
+      } else {
+        // 本机实测：从本程序启动 explorer 会被拒绝（错误 5），但打开文件正常。
+        // 这种情况不该只报错 —— 把路径交给用户，并支持一键复制。
+        setActionMsg(
+          `无法自动打开资源管理器（${r.error || '未知原因'}）。日志目录：${r.path}`,
+          'warn',
+        );
+        copyText(r.path);
+      }
     } catch (e) {
-      toast(`打开目录失败：${e}`, 'err');
+      setActionMsg(`打开目录失败：${e}`, 'err');
     }
   });
 

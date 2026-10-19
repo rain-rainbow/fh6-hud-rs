@@ -32,6 +32,8 @@ use std::sync::Mutex;
 
 #[cfg(windows)]
 mod single_instance;
+#[cfg(windows)]
+mod win_shell;
 
 use fh6_config::AppConfig;
 use serde::Serialize;
@@ -186,7 +188,10 @@ fn set_config_path(state: State<'_, AppState>, path: String) -> Result<(), Strin
     if p.is_empty() {
         return Err("路径不能为空".to_string());
     }
-    *state.config_path.lock().map_err(|_| "状态锁损坏".to_string())? = PathBuf::from(p);
+    *state
+        .config_path
+        .lock()
+        .map_err(|_| "状态锁损坏".to_string())? = PathBuf::from(p);
     Ok(())
 }
 
@@ -203,10 +208,7 @@ fn status(state: State<'_, AppState>, config: AppConfig) -> Status {
     let hud_exe = resolve_exe(&config.apps.hud_exe, "fh6-hud");
     let (relay_running, hud_running) = {
         let mut guard = state.children.lock().unwrap_or_else(|e| e.into_inner());
-        (
-            alive(&mut guard, KIND_RELAY),
-            alive(&mut guard, KIND_HUD),
-        )
+        (alive(&mut guard, KIND_RELAY), alive(&mut guard, KIND_HUD))
     };
     Status {
         config_path: state
@@ -246,7 +248,10 @@ fn start(state: State<'_, AppState>, config: AppConfig, which: String) -> Result
         .map_err(|_| "状态锁损坏".to_string())?
         .clone();
     let mut started = Vec::new();
-    let mut guard = state.children.lock().map_err(|_| "状态锁损坏".to_string())?;
+    let mut guard = state
+        .children
+        .lock()
+        .map_err(|_| "状态锁损坏".to_string())?;
 
     let mut spawn = |kind: &str, exe: PathBuf, args: Vec<String>| -> Result<(), String> {
         if alive(&mut guard, kind) {
@@ -310,7 +315,10 @@ fn start(state: State<'_, AppState>, config: AppConfig, which: String) -> Result
 /// 停止指定部分（`relay` / `hud` / `all`）。
 #[tauri::command]
 fn stop(state: State<'_, AppState>, which: String) -> Result<String, String> {
-    let mut guard = state.children.lock().map_err(|_| "状态锁损坏".to_string())?;
+    let mut guard = state
+        .children
+        .lock()
+        .map_err(|_| "状态锁损坏".to_string())?;
     let mut stopped = Vec::new();
     let kinds: Vec<&str> = if which == "all" {
         vec![KIND_RELAY, KIND_HUD]
@@ -349,9 +357,97 @@ fn quit_app(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 一份日志文件的读取结果（供界面内查看）。
+#[derive(Debug, Clone, Serialize)]
+pub struct LogFileView {
+    /// 显示名（hud / relay）。
+    pub name: String,
+    /// 绝对路径。
+    pub path: String,
+    /// 文件是否存在。
+    pub exists: bool,
+    /// 末尾若干行（不存在时为空）。
+    pub content: String,
+}
+
+/// 读取 HUD 与 relay 日志的末尾内容，用于**在界面内直接查看**。
+///
+/// 存在的意义：本机实测「打开资源管理器」可能被安全软件拒绝（Windows 错误 5），
+/// 而用户真正想要的是**看到日志内容**，不是一定要弹出一个窗口。所以提供一个
+/// 不依赖 explorer、不依赖任何外部程序的内置查看方式。
+#[tauri::command]
+fn read_logs(config: AppConfig, max_lines: Option<usize>) -> Result<Vec<LogFileView>, String> {
+    let max_lines = max_lines.unwrap_or(200).clamp(10, 2000);
+    // 基准目录取 HUD 所在目录：日志是子进程写的，与「打开日志目录」保持一致
+    let hud_exe = resolve_exe(&config.apps.hud_exe, "fh6-hud");
+    let base = hud_exe
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let mut out = Vec::new();
+    for role in ["hud", "relay"] {
+        let cfg = config.logging.for_component(role);
+        let path = cfg.resolved_path_from(&base);
+        let exists = path.is_file();
+        let content = if exists {
+            read_tail(&path, max_lines)
+        } else {
+            String::new()
+        };
+        out.push(LogFileView {
+            name: role.to_string(),
+            path: path.to_string_lossy().to_string(),
+            exists,
+            content,
+        });
+    }
+    Ok(out)
+}
+
+/// 读取文件末尾 `max_lines` 行。
+///
+/// 只读尾部而不是整个文件：日志按 8 MB 轮转，整个读进来会白占内存，
+/// 而且界面也只显示末尾。
+fn read_tail(path: &Path, max_lines: usize) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    // 每行按约 120 字节估算，读够 2 倍行数即可，最多读 2 MB
+    let want = (max_lines as u64 * 120 * 2).min(2 * 1024 * 1024).min(len);
+    if len > want {
+        let _ = f.seek(SeekFrom::Start(len - want));
+    }
+    let mut buf = Vec::with_capacity(want as usize);
+    if f.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
+}
+
+/// 「打开日志目录」的结果。
+///
+/// 之所以返回结构体而不是单纯的 `Result<(), String>`：本机实测「打开目录」可能
+/// 被安全软件拒绝（返回 Windows 错误 5），而打开文件/程序都正常 —— 说明被拦的
+/// 是**启动 explorer** 这一步。此时不该只弹一句错误，而要把路径交给用户复制。
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenDirResult {
+    /// 解析出的绝对路径。
+    pub path: String,
+    /// 是否成功唤起资源管理器。
+    pub opened: bool,
+    /// 失败原因（成功时为 `None`）。
+    pub error: Option<String>,
+}
+
 /// 在资源管理器里打开日志所在目录。
 #[tauri::command]
-fn open_log_dir(config: AppConfig) -> Result<(), String> {
+fn open_log_dir(config: AppConfig) -> Result<OpenDirResult, String> {
     // 基准目录取 **HUD 可执行文件所在目录**，而不是 GUI 自己的目录，也不是
     // 当前工作目录：日志是子进程写的，用子进程的目录才能指对地方。
     let hud_exe = resolve_exe(&config.apps.hud_exe, "fh6-hud");
@@ -360,26 +456,34 @@ fn open_log_dir(config: AppConfig) -> Result<(), String> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let target = config.logging.resolved_path_from(&base);
-    let target = target
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or(target);
+    let target = target.parent().map(|p| p.to_path_buf()).unwrap_or(target);
     let _ = std::fs::create_dir_all(&target);
+    let path = target.to_string_lossy().to_string();
+    // 直接调 ShellExecuteW：不新起 explorer 进程（那会 0xc0000142 失败），
+    // 也不经过 cmd（那会多弹一个黑色控制台窗口）。
     #[cfg(windows)]
     {
-        // 用 shell（`start`）打开目录，**不要**直接 `CreateProcess("explorer.exe")`。
-        //
-        // 实测（本机 Win10 19045）：直接启动 explorer 会以 0xc0000142
-        // （STATUS_DLL_INIT_FAILED）退出，并弹出「应用程序无法正常启动」对话框 ——
-        // 因为已有 shell 在运行，新起的 explorer 需要走「转交给现有 shell」的路径，
-        // 直接创建进程会失败。`start` 内部走 ShellExecute，不会新建 explorer 进程。
-        let dir_str = target.to_string_lossy().to_string();
-        Command::new("cmd")
-            .args(["/c", "start", "", &dir_str])
-            .spawn()
-            .map_err(|e| format!("打开目录失败: {e}"))?;
+        match win_shell::open(&target) {
+            Ok(()) => Ok(OpenDirResult {
+                path,
+                opened: true,
+                error: None,
+            }),
+            Err(e) => Ok(OpenDirResult {
+                path,
+                opened: false,
+                error: Some(e),
+            }),
+        }
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        Ok(OpenDirResult {
+            path,
+            opened: false,
+            error: Some("仅支持 Windows".to_string()),
+        })
+    }
 }
 
 // ---------------------------------------------------------------- 托盘
@@ -498,6 +602,21 @@ fn prepare_webview_data_dir() {
     }
 }
 
+/// 用系统默认程序打开一个路径（供诊断入口复用）。
+///
+/// 与「打开日志目录」走的是**同一段** `win_shell::open` 逻辑，
+/// 因此可以用命令行参数 `--open-log-dir <路径>` 验证它，而不必点界面。
+#[cfg(windows)]
+pub fn open_path(path: &std::path::Path) -> Result<(), String> {
+    win_shell::open(path)
+}
+
+/// 非 Windows 平台的占位实现。
+#[cfg(not(windows))]
+pub fn open_path(_path: &std::path::Path) -> Result<(), String> {
+    Err("仅支持 Windows".to_string())
+}
+
 /// 启动应用。
 pub fn run() {
     // 单实例保护：若已有实例在运行，唤回它的窗口并直接返回。
@@ -529,7 +648,8 @@ pub fn run() {
             stop,
             hide_to_tray,
             quit_app,
-            open_log_dir
+            open_log_dir,
+            read_logs
         ])
         .setup(|app| {
             // 托盘是**可选能力**：某些环境（远程会话、精简系统、Explorer 未就绪）
@@ -587,4 +707,75 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
+}
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+
+    /// 测试用目录放在 crate 自己的 target/ 下。
+    ///
+    /// 不用 `%TEMP%`：本仓库的测试可能在文件沙箱下运行，工作区之外的写入会被
+    /// 拒绝（实测 `create_dir_all` 返回 os error 5），与测试要验证的逻辑无关。
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let base = std::env::current_dir()
+            .unwrap_or_default()
+            .join("target")
+            .join("gui-tests");
+        let d = base.join(tag);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn read_tail_返回最后若干行() {
+        let d = tmp_dir("tail");
+        let p = d.join("a.log");
+        let body: String = (0..500).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&p, body).unwrap();
+        let tail = read_tail(&p, 10);
+        let lines: Vec<&str> = tail.lines().collect();
+        assert_eq!(lines.len(), 10, "应只返回 10 行");
+        assert_eq!(lines[9], "line 499", "最后一行应为最新写入");
+        assert_eq!(lines[0], "line 490");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_tail_行数不足时返回全部() {
+        let d = tmp_dir("short");
+        let p = d.join("b.log");
+        std::fs::write(&p, "x\ny\nz\n").unwrap();
+        assert_eq!(read_tail(&p, 100), "x\ny\nz");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_tail_文件不存在时返回空() {
+        let p = std::env::current_dir()
+            .unwrap_or_default()
+            .join("target")
+            .join("gui-tests")
+            .join("绝对不存在的日志.log");
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(read_tail(&p, 10), "");
+    }
+
+    #[test]
+    fn 大文件只读尾部() {
+        let d = tmp_dir("big");
+        let p = d.join("big.log");
+        // 5 万行、约 600 KB：远超 2 倍行数估算，仍应正确取到尾部
+        let mut s = String::new();
+        for i in 0..50_000 {
+            s.push_str(&format!("row {i}\n"));
+        }
+        std::fs::write(&p, s).unwrap();
+        let tail = read_tail(&p, 5);
+        let lines: Vec<&str> = tail.lines().collect();
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[4], "row 49999");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

@@ -40,11 +40,7 @@ const MUTEX_NAME: &str = "Local\\fh6-hud-config-gui-singleton";
 
 #[link(name = "kernel32")]
 extern "system" {
-    fn CreateMutexW(
-        attributes: *mut c_void,
-        initial_owner: Bool,
-        name: *const u16,
-    ) -> Handle;
+    fn CreateMutexW(attributes: *mut c_void, initial_owner: Bool, name: *const u16) -> Handle;
     fn GetLastError() -> u32;
 }
 
