@@ -140,6 +140,12 @@ impl LogConfig {
         }
         // 下限 4 KB、上限 1 GB：给小了会疯狂轮转，给大了可能撑爆磁盘
         self.max_bytes = self.max_bytes.clamp(4 * 1024, 1024 * 1024 * 1024);
+        // 迁移旧默认路径：`logs/fh6-hud.log` 的文件名里已经含 "hud"，
+        // 与「按组件派生」规则冲突（会得到 fh6-hud-hud.log 这种名字）。
+        // 换成中性基础名后派生结果才是 fh6-hud.log / fh6-relay.log。
+        if self.path == "logs/fh6-hud.log" {
+            self.path = "logs/fh6.log".to_string();
+        }
         self.keep_files = self.keep_files.min(50);
         *self != before
     }
@@ -687,6 +693,25 @@ mod tests {
         };
         c2.sanitize();
         assert_eq!(c2.max_bytes, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn 旧默认日志路径自动迁移() {
+        let mut c = LogConfig {
+            path: "logs/fh6-hud.log".to_string(),
+            ..Default::default()
+        };
+        c.sanitize();
+        assert_eq!(c.path, "logs/fh6.log");
+        // 迁移后派生的名字才干净
+        assert_eq!(
+            Path::new(&c.for_component("hud").path),
+            Path::new("logs/fh6-hud.log")
+        );
+        assert_eq!(
+            Path::new(&c.for_component("relay").path),
+            Path::new("logs/fh6-relay.log")
+        );
     }
 
     #[test]
